@@ -16,7 +16,7 @@ namespace httpserver {
 typedef std::unordered_map<std::string, std::string> parameters;
 
 enum operation_type {
-    GET, POST, PUT, DELETE, NUM_OPERATION
+    GET, POST, PUT, DELETE, OPTIONS, NUM_OPERATION
 };
 
 /**
@@ -25,6 +25,17 @@ enum operation_type {
  * @return the operation_type
  */
 operation_type str2type(const std::string& type);
+
+namespace api {
+
+/**
+ * Convert string to bool value. If input is invalid, exception is raised.
+ * @param val  string "true" or "1" -> true, "false", "0" or "" -> false.
+ * @return the boolean value
+ */
+bool str2bool(std::string val);
+
+}
 
 }
 

@@ -975,6 +975,11 @@ int pthread_getname_np(pthread_t p, char* name, size_t namelen)
   return 0;
 }
 
+pid_t pthread_gettid_np(pthread_t p)
+{
+    return pthread::from_libc(p)->_thread->id();
+}
+
 int pthread_attr_setaffinity_np(pthread_attr_t *attr, size_t cpusetsize,
         const cpu_set_t *cpuset)
 {
@@ -1013,6 +1018,8 @@ static int setaffinity(sched::thread* t, size_t cpusetsize,
                 }
             }
         }
+    } else if (count == (int)sched::cpus.size()) {
+        t->unpin();
     } else {
         WARN_ONCE("Warning: OSv only supports cpu_set_t with at most one "
                 "CPU set.\n pthread_setaffinity_np or sched_setaffinity ignored.\n");

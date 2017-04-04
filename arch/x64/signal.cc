@@ -26,8 +26,24 @@ void build_signal_frame(exception_frame* ef,
                         const siginfo_t& si,
                         const struct sigaction& sa)
 {
-    void* rsp = reinterpret_cast<void*>(ef->rsp);
-    rsp -= 128;                 // skip red zone
+    // If an alternative signal stack was defined for this thread with
+    // sigaltstack() and the SA_ONSTACK flag was specified, we should run
+    // the signal handler on that stack. Otherwise, we need to run further
+    // down the same stack the thread was using when it received the signal:
+    void *rsp = nullptr;
+    if (sa.sa_flags & SA_ONSTACK) {
+        stack_t sigstack;
+        sigaltstack(nullptr, &sigstack);
+        if (!(sigstack.ss_flags & SS_DISABLE)) {
+            // ss_sp points to the beginning of the stack region, but x86
+            // stacks grow downward, from the end of the region
+            rsp = sigstack.ss_sp + sigstack.ss_size;
+        }
+    }
+    if (!rsp) {
+        rsp = reinterpret_cast<void*>(ef->rsp);
+        rsp -= 128;                 // skip red zone
+    }
     rsp -= sizeof(signal_frame);
     // the Linux x86_64 calling conventions want 16-byte aligned rsp.
     // signal_frame may want even stricter alignment (but probably won't).
@@ -43,16 +59,9 @@ void build_signal_frame(exception_frame* ef,
 
 }
 
-static unsigned __thread signal_nesting;
-
 extern "C"
 void call_signal_handler(arch::signal_frame* frame)
 {
-    if (signal_nesting) {
-        // Note: nested signals are legal, but rarely used, so they usually
-        // indicate trouble
-        abort("nested signals");
-    }
     // The user's signal handler might use the FPU, so save its current state.
     // FIXME: this fpu saving is not necessary if the callers already save the
     // FPU state. Currently, only divide_error() is missing FPU saving, and
@@ -60,7 +69,6 @@ void call_signal_handler(arch::signal_frame* frame)
     // divide_error(), we can probably get rid of the fpu saving here.
     sched::fpu_lock fpu;
     SCOPE_LOCK(fpu);
-    ++signal_nesting;
     if (frame->sa.sa_flags & SA_SIGINFO) {
         ucontext_t uc = {};
         auto& regs = uc.uc_mcontext.gregs;
@@ -103,7 +111,6 @@ void call_signal_handler(arch::signal_frame* frame)
     } else {
         frame->sa.sa_handler(frame->si.si_signo);
     }
-    --signal_nesting;
 }
 
 

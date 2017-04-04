@@ -8,6 +8,7 @@
 #include "xen.hh"
 #include <osv/debug.hh>
 #include <osv/mmu.hh>
+#include <osv/xen.hh>
 #include "processor.hh"
 #include "cpuid.hh"
 #include "exceptions.hh"
@@ -15,6 +16,7 @@
 #include <osv/sched.hh>
 #include <bsd/porting/pcpu.h>
 #include <machine/xen/xen-os.h>
+#include <xen/evtchn.h>
 
 shared_info_t *HYPERVISOR_shared_info;
 uint8_t xen_features[XENFEAT_NR_SUBMAPS * 32];
@@ -114,13 +116,6 @@ void evtchn_irq_is_legacy(void);
 
 namespace xen {
 
-static bool xen_ack_irq()
-{
-    auto cpu = sched::cpu::current();
-    HYPERVISOR_shared_info->vcpu_info[cpu->id].evtchn_upcall_pending = 0; 
-    return true;
-}
-
 // For HVMOP_set_param the param vector is comprised of
 // the vector number in the low part, and then:
 // - all the rest zeroed if we are requesting an ISA irq
@@ -205,6 +200,20 @@ void xen_init(processor::features_type &features, unsigned base)
 
         features.xen_pci = xen_pci_enabled();
         HYPERVISOR_shared_info = reinterpret_cast<shared_info_t *>(&xen_shared_info);
+}
+
+void irq_init()
+{
+    if (!is_xen())
+        return;
+
+    evtchn_init(NULL);
+
+    /* if vector callback not supported, platform PCI driver will handle that */
+    if (processor::features().xen_vector_callback)
+        xen::xen_set_callback();
+
+    irq_setup(NULL);
 }
 
 extern "C"

@@ -495,6 +495,13 @@ public:
      * method), this is a static function taking the thread as a parameter.
      */
     static void pin(thread *t, cpu *target_cpu);
+    /**
+     * Unpin the given thread.
+     *
+     * This undoes the operation of a previous pin() operation (if any), and
+     * allows the thread to be later migrated to any CPU.
+     */
+    void unpin();
 
 #ifdef __OSV_CORE__
     static inline thread* current() { return s_current; };
@@ -1321,6 +1328,18 @@ inline void migrate_enable()
 // creation and destruction that happen in this duration. For this reason,
 // this function should be used sparingly, e.g., for debugging.
 void with_all_threads(std::function<void(sched::thread &)>);
+
+// with_thread_by_id(id, f) finds the thread with the given id, and calls
+// the given function f() for it. A pointer to the thread is passed, or a
+// null pointer if a thread with that id does not exist.
+// The implementation is safe, in that it is guaranteed that while f is
+// operating on the thread, the thread object will not be concurrently
+// destroyed.
+// NOTE: The current implementation holds a mutex (thread_map_mutex) during
+// the entire with_thread_by_id() run. This blocks, among other things,
+// thread creation and destruction. For this reason, the given function
+// should return quickly.
+void with_thread_by_id(unsigned id, std::function<void(sched::thread *)>);
 
 }
 
