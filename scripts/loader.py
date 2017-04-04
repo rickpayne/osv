@@ -116,8 +116,50 @@ def symbol_formatter(src_addr):
 def syminfo(addr):
     return symbol_formatter(symbol_resolver(addr)[0])
 
+class Manifest(object):
+
+    def __init__(self):
+        # Load data from usr.manifest in build_dir
+        mm_path = os.path.join(build_dir, 'usr.manifest')
+        try:
+            self.data = open(mm_path).read().split('\n')
+        except IOError:
+            self.data = []
+
+    def find(self, path):
+        '''Try to locate file with help of usr.manifest'''
+        files = [ff.split(':', 1)[1].strip() for ff in self.data if ff.split(':', 1)[0].strip() == path]
+        if files:
+            file = files[-1]  # the last line in usr.manifest wins
+        else:
+            file = ""
+        file = self.resolve_symlink(file)
+        print('manifest.find_file: path=%s, found file=%s' % (path, file))
+        # usr.manifest contains lines like "%(gccbase)s/lib64/libgcc_s.so.1" too.
+        # Filter out such cases.
+        if os.path.exists(file):
+            return file
+        else:
+            return ""
+
+    def resolve_symlink(self, file):
+        '''If file is a symlink, try to resolve it with help of usr.manifest'''
+        resolved_file = file
+        if file.startswith('->'):
+            path = file[2:]
+            resolved_file = self.find(path)
+            # print('manifest.resolve_symlink: file=%s, resolved_file=%s' % (file, resolved_file))
+        return resolved_file
+
+manifest = Manifest()
+
 def translate(path):
     '''given a path, try to find it on the host OS'''
+    # First, try to locate file with help of usr.manifest
+    file = manifest.find(path)
+    if file:
+        return file
+    # Next, search for file in configured directories
     name = os.path.basename(path)
     for top in [build_dir, external, modules, apps_dir, '/zfs']:
         for root, dirs, files in os.walk(top):
@@ -133,15 +175,21 @@ class Connect(gdb.Command):
                              gdb.COMMAND_NONE,
                              gdb.COMPLETE_NONE)
     def invoke(self, arg, from_tty):
-        port = 1234
+        host_port = 'localhost:1234'
         if arg:
-            port = int(arg.split()[0])
-        gdb.execute('target remote :%d' % port)
+            host_port = arg.split()[0]
+        gdb.execute('target remote %s' % host_port)
         global status_enum
-        status_enum.running = gdb.parse_and_eval('sched::thread::status::running')
-        status_enum.waiting = gdb.parse_and_eval('sched::thread::status::waiting')
-        status_enum.queued = gdb.parse_and_eval('sched::thread::status::queued')
-        status_enum.waking = gdb.parse_and_eval('sched::thread::status::waking')
+        try:
+            status_enum.running = gdb.parse_and_eval('sched::thread::status::running')
+            status_enum.waiting = gdb.parse_and_eval('sched::thread::status::waiting')
+            status_enum.queued = gdb.parse_and_eval('sched::thread::status::queued')
+            status_enum.waking = gdb.parse_and_eval('sched::thread::status::waking')
+        except:
+            status_enum.running = gdb.parse_and_eval('sched::thread::running')
+            status_enum.waiting = gdb.parse_and_eval('sched::thread::waiting')
+            status_enum.queued = gdb.parse_and_eval('sched::thread::queued')
+            status_enum.waking = gdb.parse_and_eval('sched::thread::waking')
 
 
 Connect()
@@ -239,7 +287,10 @@ def vma_list(node=None):
         node = intrusive_set_root_node(fpr)
 
     if node:
-        offset = gdb.parse_and_eval("(int)&(('mmu::vma'*)0)->_vma_list_hook")
+        try:
+            offset = gdb.parse_and_eval("(int)&(('mmu::vma'*)0)->_vma_list_hook")
+        except:
+            offset = gdb.parse_and_eval("(int)&((mmu::vma*)0)->_vma_list_hook")
         vma = node.cast(gdb.lookup_type('void').pointer()) - offset
         vma = vma.cast(gdb.lookup_type('mmu::vma').pointer())
 

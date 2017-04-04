@@ -338,7 +338,7 @@ CFLAGS = -std=gnu99 $(COMMON)
 CFLAGS += -I libc/stdio -I libc/internal -I libc/arch/$(arch) \
 	-Wno-missing-braces -Wno-parentheses -Wno-unused-but-set-variable
 
-ASFLAGS = -g $(autodepend) -DASSEMBLY
+ASFLAGS = -g $(autodepend) -D__ASSEMBLY__
 
 $(out)/fs/vfs/main.o: CXXFLAGS += -Wno-sign-compare -Wno-write-strings
 
@@ -488,7 +488,7 @@ $(out)/preboot.bin: $(out)/preboot.elf
 $(out)/loader.img: $(out)/preboot.bin $(out)/loader-stripped.elf
 	$(call quiet, dd if=$(out)/preboot.bin of=$@ > /dev/null 2>&1, DD $@ preboot.bin)
 	$(call quiet, dd if=$(out)/loader-stripped.elf of=$@ conv=notrunc obs=4096 seek=16 > /dev/null 2>&1, DD $@ loader-stripped.elf)
-	$(call quiet, scripts/imgedit.py setargs $@ $(cmdline), IMGEDIT $@)
+	$(call quiet, scripts/imgedit.py setargs "-f raw $@" $(cmdline), IMGEDIT $@)
 
 endif # aarch64
 
@@ -596,11 +596,11 @@ bsd += bsd/sys/netinet/arpcache.o
 bsd += bsd/sys/xdr/xdr.o
 bsd += bsd/sys/xdr/xdr_array.o
 bsd += bsd/sys/xdr/xdr_mem.o
+bsd += bsd/sys/xen/evtchn.o
 
 ifeq ($(arch),x64)
 $(out)/bsd/%.o: COMMON += -DXEN -DXENHVM
 bsd += bsd/sys/xen/gnttab.o
-bsd += bsd/sys/xen/evtchn.o
 bsd += bsd/sys/xen/xenstore/xenstore.o
 bsd += bsd/sys/xen/xenbus/xenbus.o
 bsd += bsd/sys/xen/xenbus/xenbusb.o
@@ -819,10 +819,12 @@ drivers += drivers/ahci.o
 drivers += drivers/ide.o
 drivers += drivers/scsi-common.o
 drivers += drivers/vmw-pvscsi.o
+drivers += drivers/xenplatform-pci.o
 endif # x64
 
 ifeq ($(arch),aarch64)
 drivers += drivers/pl011.o
+drivers += drivers/xenconsole.o
 drivers += drivers/virtio.o
 drivers += drivers/virtio-vring.o
 drivers += drivers/virtio-rng.o
@@ -850,6 +852,8 @@ objects += arch/$(arch)/interrupt.o
 objects += arch/$(arch)/pci.o
 objects += arch/$(arch)/msi.o
 objects += arch/$(arch)/power.o
+objects += arch/$(arch)/feexcept.o
+objects += arch/$(arch)/xen.o
 
 $(out)/arch/x64/string-ssse3.o: CXXFLAGS += -mssse3
 
@@ -858,6 +862,7 @@ objects += arch/$(arch)/psci.o
 objects += arch/$(arch)/arm-clock.o
 objects += arch/$(arch)/gic.o
 objects += arch/$(arch)/arch-dtb.o
+objects += arch/$(arch)/hypercall.o
 objects += $(libfdt)
 endif
 
@@ -869,12 +874,11 @@ objects += arch/x64/ioapic.o
 objects += arch/x64/apic.o
 objects += arch/x64/apic-clock.o
 objects += arch/x64/entry-xen.o
-objects += arch/x64/xen.o
-objects += arch/x64/xen_intr.o
 objects += core/sampler.o
 objects += $(acpi)
 endif # x64
 
+objects += core/xen_intr.o
 objects += core/math.o
 objects += core/spinlock.o
 objects += core/lfmutex.o
@@ -1129,7 +1133,7 @@ musl += math/exp10l.o
 musl += math/exp2.o
 musl += math/exp2f.o
 musl += math/exp2l.o
-$(out)/musl/src/math/exp2l.o: CFLAGS += -Wno-error=unused-variable
+$(out)/musl/src/math/exp2l.o: CFLAGS += -Wno-unused-variable
 musl += math/expf.o
 musl += math/expl.o
 musl += math/expm1.o
@@ -1179,12 +1183,12 @@ musl += math/ldexpf.o
 musl += math/ldexpl.o
 musl += math/lgamma.o
 musl += math/lgamma_r.o
-$(out)/musl/src/math/lgamma_r.o: CFLAGS += -Wno-error=maybe-uninitialized
+$(out)/musl/src/math/lgamma_r.o: CFLAGS += -Wno-maybe-uninitialized
 musl += math/lgammaf.o
 musl += math/lgammaf_r.o
-$(out)/musl/src/math/lgammaf_r.o: CFLAGS += -Wno-error=maybe-uninitialized
+$(out)/musl/src/math/lgammaf_r.o: CFLAGS += -Wno-maybe-uninitialized
 musl += math/lgammal.o
-$(out)/musl/src/math/lgammal.o: CFLAGS += -Wno-error=maybe-uninitialized
+$(out)/musl/src/math/lgammal.o: CFLAGS += -Wno-maybe-uninitialized
 #musl += math/llrint.o
 #musl += math/llrintf.o
 #musl += math/llrintl.o
@@ -1218,9 +1222,12 @@ musl += math/modfl.o
 musl += math/nan.o
 musl += math/nanf.o
 musl += math/nanl.o
-#musl += math/nearbyint.o
-#musl += math/nearbyintf.o
-#musl += math/nearbyintl.o
+musl += math/nearbyint.o
+$(out)/musl/src/math/nearbyint.o: CFLAGS += -Wno-unknown-pragmas
+musl += math/nearbyintf.o
+$(out)/musl/src/math/nearbyintf.o: CFLAGS += -Wno-unknown-pragmas
+musl += math/nearbyintl.o
+$(out)/musl/src/math/nearbyintl.o: CFLAGS += -Wno-unknown-pragmas
 musl += math/nextafter.o
 musl += math/nextafterf.o
 musl += math/nextafterl.o
@@ -1278,12 +1285,26 @@ musl += math/trunc.o
 musl += math/truncf.o
 musl += math/truncl.o
 
+# Issue #867: Gcc 4.8.4 has a bug where it optimizes the trivial round-
+# related functions incorrectly - it appears to convert calls to any
+# function called round() to calls to a function called lround() -
+# and similarly for roundf() and roundl().
+# None of the specific "-fno-*" options disable this buggy optimization,
+# unfortunately. The simplest workaround is to just disable optimization
+# for the affected files.
+$(out)/musl/src/math/lround.o: conf-opt := $(conf-opt) -O0
+$(out)/musl/src/math/lroundf.o: conf-opt := $(conf-opt) -O0
+$(out)/musl/src/math/lroundl.o: conf-opt := $(conf-opt) -O0
+$(out)/musl/src/math/llround.o: conf-opt := $(conf-opt) -O0
+$(out)/musl/src/math/llroundf.o: conf-opt := $(conf-opt) -O0
+$(out)/musl/src/math/llroundl.o: conf-opt := $(conf-opt) -O0
+
 musl += misc/a64l.o
 libc += misc/basename.o
 musl += misc/dirname.o
 libc += misc/ffs.o
 musl += misc/get_current_dir_name.o
-musl += misc/gethostid.o
+libc += misc/gethostid.o
 musl += misc/getopt.o
 musl += misc/getopt_long.o
 musl += misc/getsubopt.o
@@ -1604,6 +1625,7 @@ musl += temp/__randname.o
 musl += temp/mkdtemp.o
 musl += temp/mkstemp.o
 musl += temp/mktemp.o
+musl += temp/mkostemp.o
 musl += temp/mkostemps.o
 
 libc += time/__asctime.o
@@ -1685,6 +1707,8 @@ musl += fenv/fegetexceptflag.o
 musl += fenv/feholdexcept.o
 musl += fenv/fesetexceptflag.o
 musl += fenv/$(musl_arch)/fenv.o
+else
+musl += fenv/fenv.o
 endif
 
 musl += crypt/crypt_blowfish.o
