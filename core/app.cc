@@ -133,10 +133,6 @@ shared_app_t application::run(const std::string& command,
     return app;
 }
 
-void run(const std::vector<std::string>& args) {
-    application::run(args);
-}
-
 shared_app_t application::run_and_join(const std::string& command,
                       const std::vector<std::string>& args,
                       bool new_program,
@@ -301,7 +297,7 @@ void application::run_main(std::string path, int argc, char** argv)
     program_invocation_name = c_path;
     program_invocation_short_name = basename(c_path);
 
-    auto sz = argc; // for the trailing 0's.
+    unsigned sz = argc; // for the trailing 0's.
     for (int i = 0; i < argc; ++i) {
         sz += strlen(argv[i]);
     }
@@ -417,6 +413,10 @@ int application::get_return_code()
 std::string application::get_command()
 {
     return _command;
+}
+
+pid_t application::get_main_thread_id() {
+    return pthread_gettid_np(_thread);
 }
 
 // For simplicity, we will not reuse bits in the bitmap, since no destructor is

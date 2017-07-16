@@ -77,7 +77,14 @@ class Fedora(object):
         ec2_post_install = None
         version = '24'
 
-    versions = [Fedora_19, Fedora_20, Fedora_21, Fedora_22, Fedora_23, Fedora_24]
+    class Fedora_25(object):
+        packages = ['java-1.8.0-openjdk', 'python2-requests']
+        ec2_packages = []
+        test_packages = []
+        ec2_post_install = None
+        version = '25'
+
+    versions = [Fedora_19, Fedora_20, Fedora_21, Fedora_22, Fedora_23, Fedora_24, Fedora_25]
 
 class RHELbased(Fedora):
     name = ['Scientific Linux', 'NauLinux', 'CentOS Linux',
@@ -90,7 +97,28 @@ class RHELbased(Fedora):
         ec2_post_install = None
         version = '7.0'
 
-    versions = [RHELbased_70]
+    class RHELbased_71(object):
+        packages = []
+        ec2_packages = []
+        test_packages = []
+        ec2_post_install = None
+        version = '7.1'
+
+    class RHELbased_72(object):
+        packages = []
+        ec2_packages = []
+        test_packages = []
+        ec2_post_install = None
+        version = '7.2'
+
+    class RHELbased_73(object):
+        packages = []
+        ec2_packages = []
+        test_packages = []
+        ec2_post_install = None
+        version = '7.3'
+
+    versions = [RHELbased_70, RHELbased_71, RHELbased_72, RHELbased_73]
 
 class Debian(object):
     name = 'debian'
@@ -118,7 +146,7 @@ class Ubuntu(object):
     name = 'Ubuntu'
     install = 'apt-get -y install'
     packages = ['build-essential', 'libboost-all-dev', 'genromfs', 'autoconf',
-                'libtool', 'openjdk-7-jdk', 'ant', 'qemu-utils', 'maven',
+                'libtool', 'ant', 'qemu-utils', 'maven',
                 'libmaven-shade-plugin-java', 'python-dpkt', 'tcpdump', 'gdb', 'qemu-system-x86',
                 'gawk', 'gnutls-bin', 'openssl', 'python-requests', 'p11-kit', 'g++-multilib',
                 'libssl-dev', 'libedit-dev', 'curl', 'libvirt-bin',
@@ -128,28 +156,35 @@ class Ubuntu(object):
     test_packages = ['libssl-dev', 'zip']
     ec2_post_install = None
 
+    class Ubuntu_16_04(object):
+        packages = ['openjdk-8-jdk']
+        ec2_packages = ['ec2-api-tools', 'awscli']
+        test_packages = []
+        ec2_post_install = None
+        version = '16.04'
+
     class Ubuntu_15_04(object):
-        packages = []
+        packages = ['openjdk-7-jdk']
         ec2_packages = ['ec2-api-tools', 'awscli']
         test_packages = []
         ec2_post_install = None
         version = '15.04'
 
     class Ubuntu_14_04(object):
-        packages = []
+        packages = ['openjdk-7-jdk']
         ec2_packages = ['ec2-api-tools', 'awscli']
         test_packages = []
         ec2_post_install = None
         version = '14.04'
 
     class Ubuntu_13_10(object):
-        packages = []
+        packages = ['openjdk-7-jdk']
         ec2_packages = []
         test_packages = []
         ec2_post_install = standard_ec2_post_install
         version = '13.10'
 
-    versions = [Ubuntu_15_04, Ubuntu_14_04, Ubuntu_13_10]
+    versions = [Ubuntu_16_04, Ubuntu_15_04, Ubuntu_14_04, Ubuntu_13_10]
 
 distros = [
            Debian(),
@@ -190,7 +225,7 @@ for distro in distros:
                     if dver.ec2_post_install:
                         subprocess.check_call(dver.ec2_post_install, shell=True)
                 sys.exit(0)
-        print 'Your distribution version is not supported by this script'
+        print ('Your distribution %s version %s is not supported by this script' % (name, version))
         sys.exit(1)
 
 print 'Your distribution is not supported by this script.'

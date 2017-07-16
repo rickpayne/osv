@@ -1,6 +1,6 @@
 #!/usr/bin/python
 
-import os, struct, optparse, io
+import os, struct, optparse, io, subprocess
 try:
     import configparser
 except ImportError:
@@ -30,6 +30,8 @@ def expand(items):
             yield (name, hostname)
 
 def unsymlink(f):
+    if f.startswith('!'):
+        f = f[1:]
     try:
         link = os.readlink(f)
         if link.startswith('/'):
@@ -51,6 +53,23 @@ def read_manifest(fn):
     files = dict([(f, manifest.get('manifest', f, vars=defines))
                   for f in manifest.options('manifest')])
     return files
+
+def to_strip(filename):
+    ff = os.path.abspath(filename)
+    osvdir = os.path.abspath('../..')
+    return ff.startswith(os.getcwd()) or \
+        ff.startswith(osvdir + "/modules") or \
+        ff.startswith(osvdir + "/apps")
+
+def strip_file(filename):
+    stripped_filename = filename
+    if filename.endswith(".so") and to_strip(filename):
+        stripped_filename = filename[:-3] + "-stripped.so"
+        if not os.path.exists(stripped_filename) \
+                or (os.path.getmtime(stripped_filename) < \
+                    os.path.getmtime(filename)):
+            subprocess.call([os.getenv("STRIP", "strip"), "-o", stripped_filename, filename])
+    return stripped_filename
 
 def main():
     make_option = optparse.make_option
@@ -79,6 +98,7 @@ def main():
 
     (options, args) = opt.parse_args()
 
+    # See unpack_bootfs() as the reference to this ad-hoc packing format.
     metadata_size = 128
     depends = io.StringIO()
     if options.depends:
@@ -90,21 +110,27 @@ def main():
     files = read_manifest(options.manifest)
     files = list(expand(files.items()))
     files = [(x, unsymlink(y)) for (x, y) in files]
+    files = [(x, y) for (x, y) in files if not x.endswith("-stripped.so")]
+    files = [(x, strip_file(y)) for (x, y) in files]
 
     pos = (len(files) + 1) * metadata_size
 
     for name, hostname in files:
+        type = 0
         if hostname.startswith("->"):
-            raise Exception("Symlinks in bootfs are not supported")
-
-        if os.path.isdir(hostname):
+            link = hostname[2:]
+            type = 1
+            size = len(link.encode())+1
+        elif os.path.isdir(hostname):
             size = 0;
             if not name.endswith("/"):
                 name += "/"
         else:
             size = os.stat(hostname).st_size
 
-        metadata = struct.pack('QQ112s', size, pos, name.encode())
+        # FIXME: check if name.encode()'s length is more than 110 (111
+        # minus the necessary null byte) and fail if it is.
+        metadata = struct.pack('QQb111s', size, pos, type, name.encode())
         out.write(metadata)
         pos += size
         depends.write(u'\t%s \\\n' % (hostname,))
@@ -114,7 +140,12 @@ def main():
     for name, hostname in files:
         if os.path.isdir(hostname):
             continue
-        out.write(open(hostname, 'rb').read())
+        if hostname.startswith("->"):
+            link = hostname[2:]
+            out.write(link.encode())
+            out.write('\0')
+        else:
+            out.write(open(hostname, 'rb').read())
 
     depends.write(u'\n\n')
 

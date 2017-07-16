@@ -84,11 +84,11 @@ ifeq (,$(wildcard conf/$(arch).mk))
 endif
 include conf/$(arch).mk
 
-CROSS_PREFIX ?= $(if $(filter-out $(arch), $(host_arch)), $(arch)-linux-gnu-)
+CROSS_PREFIX ?= $(if $(filter-out $(arch),$(host_arch)),$(arch)-linux-gnu-)
 CXX=$(CROSS_PREFIX)g++
 CC=$(CROSS_PREFIX)gcc
 LD=$(CROSS_PREFIX)ld.bfd
-STRIP=$(CROSS_PREFIX)strip
+export STRIP=$(CROSS_PREFIX)strip
 OBJCOPY=$(CROSS_PREFIX)objcopy
 
 # Our makefile puts all compilation results in a single directory, $(out),
@@ -131,17 +131,7 @@ endif
 quiet = $(if $V, $1, @echo " $2"; $1)
 very-quiet = $(if $V, $1, @$1)
 
-# TODO: These java-targets shouldn't be compiled here, but rather in modules/java/Makefile.
-# The problem is that getting the right compilation lines there is hard :-(
-ifeq ($(arch),aarch64)
-java-targets :=
-else
-java-targets := $(out)/java/jvm/java.so $(out)/java/jvm/java_non_isolated.so \
-	$(out)/java/jni/balloon.so $(out)/java/jni/elf-loader.so $(out)/java/jni/networking.so \
-        $(out)/java/jni/stty.so $(out)/java/jni/tracepoint.so $(out)/java/jni/power.so $(out)/java/jni/monitor.so
-endif
-
-all: $(out)/loader.img $(java-targets) links
+all: $(out)/loader.img links
 .PHONY: all
 
 links:
@@ -319,7 +309,7 @@ gcc-sysroot = $(if $(CROSS_PREFIX), --sysroot external/$(arch)/gcc.bin) \
 # To add something that will *not* be part of the main kernel, you can do:
 #
 #   mydir/*.o EXTRA_FLAGS = <MY_STUFF>
-EXTRA_FLAGS = -D__OSV_CORE__ -DOSV_KERNEL_BASE=$(kernel_base)
+EXTRA_FLAGS = -D__OSV_CORE__ -DOSV_KERNEL_BASE=$(kernel_base) -DOSV_LZKERNEL_BASE=$(lzkernel_base)
 EXTRA_LIBS =
 COMMON = $(autodepend) -g -Wall -Wno-pointer-arith $(CFLAGS_WERROR) -Wformat=0 -Wno-format-security \
 	-D __BSD_VISIBLE=1 -U _FORTIFY_SOURCE -fno-stack-protector $(INCLUDES) \
@@ -348,7 +338,7 @@ CFLAGS = -std=gnu99 $(COMMON)
 CFLAGS += -I libc/stdio -I libc/internal -I libc/arch/$(arch) \
 	-Wno-missing-braces -Wno-parentheses -Wno-unused-but-set-variable
 
-ASFLAGS = -g $(autodepend) -DASSEMBLY
+ASFLAGS = -g $(autodepend) -D__ASSEMBLY__
 
 $(out)/fs/vfs/main.o: CXXFLAGS += -Wno-sign-compare -Wno-write-strings
 
@@ -376,10 +366,6 @@ $(out)/%.o: %.cc | generated-headers
 $(out)/%.o: %.c | generated-headers
 	$(makedir)
 	$(call quiet, $(CC) $(CFLAGS) -c -o $@ $<, CC $*.c)
-
-$(out)/java/jvm/java_non_isolated.o: java/jvm/java.cc | generated-headers
-	$(makedir)
-	$(call quiet, $(CXX) $(CXXFLAGS) -DRUN_JAVA_NON_ISOLATED -o $@ -c java/jvm/java.cc, CXX $<)
 
 $(out)/%.o: %.S
 	$(makedir)
@@ -428,7 +414,17 @@ $(out)/loader-stripped.elf: $(out)/loader.elf
 
 ifeq ($(arch),x64)
 
+# kernel_base is where the kernel will be loaded after uncompression.
+# lzkernel_base is where the compressed kernel is loaded from disk.
+# As issue #872 explains, lzkernel_base must be chosen high enough for
+# (lzkernel_base - kernel_base) to be bigger than the kernel's size.
+# On the other hand, don't increase lzkernel_base too much, because it puts
+# a lower limit on the VM's RAM size.
+# Below we verify that the compiled kernel isn't too big given the current
+# setting of these paramters; Otherwise we recommend to increase lzkernel_base.
 kernel_base := 0x200000
+lzkernel_base := 0x1800000
+
 
 $(out)/boot.bin: arch/x64/boot16.ld $(out)/arch/x64/boot16.o
 	$(call quiet, $(LD) -o $@ -T $^, LD $@)
@@ -466,8 +462,8 @@ $(out)/fastlz/lzloader.o: fastlz/lzloader.cc | generated-headers
 
 $(out)/lzloader.elf: $(out)/loader-stripped.elf.lz.o $(out)/fastlz/lzloader.o arch/x64/lzloader.ld \
 	$(out)/fastlz/fastlz.o
-	$(call very-quiet, scripts/check-image-size.sh $(out)/loader-stripped.elf 23068672)
-	$(call quiet, $(LD) -o $@ \
+	$(call very-quiet, scripts/check-image-size.sh $(out)/loader-stripped.elf $(shell bash -c 'echo $$(($(lzkernel_base)-$(kernel_base)))'))
+	$(call quiet, $(LD) -o $@ --defsym=OSV_LZKERNEL_BASE=$(lzkernel_base) \
 		-Bdynamic --export-dynamic --eh-frame-hdr --enable-new-dtags \
 		-T arch/x64/lzloader.ld \
 		$(filter %.o, $^), LINK lzloader.elf)
@@ -501,7 +497,7 @@ $(out)/preboot.bin: $(out)/preboot.elf
 $(out)/loader.img: $(out)/preboot.bin $(out)/loader-stripped.elf
 	$(call quiet, dd if=$(out)/preboot.bin of=$@ > /dev/null 2>&1, DD $@ preboot.bin)
 	$(call quiet, dd if=$(out)/loader-stripped.elf of=$@ conv=notrunc obs=4096 seek=16 > /dev/null 2>&1, DD $@ loader-stripped.elf)
-	$(call quiet, scripts/imgedit.py setargs $@ $(cmdline), IMGEDIT $@)
+	$(call quiet, scripts/imgedit.py setargs "-f raw $@" $(cmdline), IMGEDIT $@)
 
 endif # aarch64
 
@@ -580,6 +576,7 @@ bsd += bsd/sys/netinet/in.o
 bsd += bsd/sys/netinet/in_pcb.o
 bsd += bsd/sys/netinet/in_proto.o
 bsd += bsd/sys/netinet/in_mcast.o
+$(out)/bsd/sys/netinet/in_mcast.o: COMMON += -Wno-maybe-uninitialized
 bsd += bsd/sys/netinet/in_rmx.o
 bsd += bsd/sys/netinet/ip_id.o
 bsd += bsd/sys/netinet/ip_icmp.o
@@ -609,17 +606,18 @@ bsd += bsd/sys/netinet/arpcache.o
 bsd += bsd/sys/xdr/xdr.o
 bsd += bsd/sys/xdr/xdr_array.o
 bsd += bsd/sys/xdr/xdr_mem.o
+bsd += bsd/sys/xen/evtchn.o
 
 ifeq ($(arch),x64)
 $(out)/bsd/%.o: COMMON += -DXEN -DXENHVM
 bsd += bsd/sys/xen/gnttab.o
-bsd += bsd/sys/xen/evtchn.o
 bsd += bsd/sys/xen/xenstore/xenstore.o
 bsd += bsd/sys/xen/xenbus/xenbus.o
 bsd += bsd/sys/xen/xenbus/xenbusb.o
 bsd += bsd/sys/xen/xenbus/xenbusb_front.o
 bsd += bsd/sys/dev/xen/netfront/netfront.o
 bsd += bsd/sys/dev/xen/blkfront/blkfront.o
+bsd += bsd/sys/dev/hyperv/vmbus/hyperv.o
 endif
 
 bsd += bsd/sys/dev/random/hash.o
@@ -823,19 +821,22 @@ drivers += drivers/vmxnet3-queues.o
 drivers += drivers/virtio-blk.o
 drivers += drivers/virtio-scsi.o
 drivers += drivers/virtio-rng.o
-drivers += drivers/kvmclock.o drivers/xenclock.o
+drivers += drivers/kvmclock.o drivers/xenclock.o drivers/hypervclock.o
 drivers += drivers/acpi.o
 drivers += drivers/hpet.o
+drivers += drivers/rtc.o
 drivers += drivers/xenfront.o drivers/xenfront-xenbus.o drivers/xenfront-blk.o
 drivers += drivers/pvpanic.o
 drivers += drivers/ahci.o
 drivers += drivers/ide.o
 drivers += drivers/scsi-common.o
 drivers += drivers/vmw-pvscsi.o
+drivers += drivers/xenplatform-pci.o
 endif # x64
 
 ifeq ($(arch),aarch64)
 drivers += drivers/pl011.o
+drivers += drivers/xenconsole.o
 drivers += drivers/virtio.o
 drivers += drivers/virtio-vring.o
 drivers += drivers/virtio-rng.o
@@ -863,6 +864,8 @@ objects += arch/$(arch)/interrupt.o
 objects += arch/$(arch)/pci.o
 objects += arch/$(arch)/msi.o
 objects += arch/$(arch)/power.o
+objects += arch/$(arch)/feexcept.o
+objects += arch/$(arch)/xen.o
 
 $(out)/arch/x64/string-ssse3.o: CXXFLAGS += -mssse3
 
@@ -871,6 +874,7 @@ objects += arch/$(arch)/psci.o
 objects += arch/$(arch)/arm-clock.o
 objects += arch/$(arch)/gic.o
 objects += arch/$(arch)/arch-dtb.o
+objects += arch/$(arch)/hypercall.o
 objects += $(libfdt)
 endif
 
@@ -882,12 +886,11 @@ objects += arch/x64/ioapic.o
 objects += arch/x64/apic.o
 objects += arch/x64/apic-clock.o
 objects += arch/x64/entry-xen.o
-objects += arch/x64/xen.o
-objects += arch/x64/xen_intr.o
 objects += core/sampler.o
 objects += $(acpi)
 endif # x64
 
+objects += core/xen_intr.o
 objects += core/math.o
 objects += core/spinlock.o
 objects += core/lfmutex.o
@@ -1142,7 +1145,7 @@ musl += math/exp10l.o
 musl += math/exp2.o
 musl += math/exp2f.o
 musl += math/exp2l.o
-$(out)/musl/src/math/exp2l.o: CFLAGS += -Wno-error=unused-variable
+$(out)/musl/src/math/exp2l.o: CFLAGS += -Wno-unused-variable
 musl += math/expf.o
 musl += math/expl.o
 musl += math/expm1.o
@@ -1192,12 +1195,12 @@ musl += math/ldexpf.o
 musl += math/ldexpl.o
 musl += math/lgamma.o
 musl += math/lgamma_r.o
-$(out)/musl/src/math/lgamma_r.o: CFLAGS += -Wno-error=maybe-uninitialized
+$(out)/musl/src/math/lgamma_r.o: CFLAGS += -Wno-maybe-uninitialized
 musl += math/lgammaf.o
 musl += math/lgammaf_r.o
-$(out)/musl/src/math/lgammaf_r.o: CFLAGS += -Wno-error=maybe-uninitialized
+$(out)/musl/src/math/lgammaf_r.o: CFLAGS += -Wno-maybe-uninitialized
 musl += math/lgammal.o
-$(out)/musl/src/math/lgammal.o: CFLAGS += -Wno-error=maybe-uninitialized
+$(out)/musl/src/math/lgammal.o: CFLAGS += -Wno-maybe-uninitialized
 #musl += math/llrint.o
 #musl += math/llrintf.o
 #musl += math/llrintl.o
@@ -1231,9 +1234,12 @@ musl += math/modfl.o
 musl += math/nan.o
 musl += math/nanf.o
 musl += math/nanl.o
-#musl += math/nearbyint.o
-#musl += math/nearbyintf.o
-#musl += math/nearbyintl.o
+musl += math/nearbyint.o
+$(out)/musl/src/math/nearbyint.o: CFLAGS += -Wno-unknown-pragmas
+musl += math/nearbyintf.o
+$(out)/musl/src/math/nearbyintf.o: CFLAGS += -Wno-unknown-pragmas
+musl += math/nearbyintl.o
+$(out)/musl/src/math/nearbyintl.o: CFLAGS += -Wno-unknown-pragmas
 musl += math/nextafter.o
 musl += math/nextafterf.o
 musl += math/nextafterl.o
@@ -1291,12 +1297,26 @@ musl += math/trunc.o
 musl += math/truncf.o
 musl += math/truncl.o
 
+# Issue #867: Gcc 4.8.4 has a bug where it optimizes the trivial round-
+# related functions incorrectly - it appears to convert calls to any
+# function called round() to calls to a function called lround() -
+# and similarly for roundf() and roundl().
+# None of the specific "-fno-*" options disable this buggy optimization,
+# unfortunately. The simplest workaround is to just disable optimization
+# for the affected files.
+$(out)/musl/src/math/lround.o: conf-opt := $(conf-opt) -O0
+$(out)/musl/src/math/lroundf.o: conf-opt := $(conf-opt) -O0
+$(out)/musl/src/math/lroundl.o: conf-opt := $(conf-opt) -O0
+$(out)/musl/src/math/llround.o: conf-opt := $(conf-opt) -O0
+$(out)/musl/src/math/llroundf.o: conf-opt := $(conf-opt) -O0
+$(out)/musl/src/math/llroundl.o: conf-opt := $(conf-opt) -O0
+
 musl += misc/a64l.o
 libc += misc/basename.o
 musl += misc/dirname.o
 libc += misc/ffs.o
 musl += misc/get_current_dir_name.o
-musl += misc/gethostid.o
+libc += misc/gethostid.o
 musl += misc/getopt.o
 musl += misc/getopt_long.o
 musl += misc/getsubopt.o
@@ -1490,7 +1510,7 @@ musl += stdio/ungetc.o
 musl += stdio/ungetwc.o
 musl += stdio/vasprintf.o
 libc += stdio/vdprintf.o
-musl += stdio/vfprintf.o
+libc += stdio/vfprintf.o
 libc += stdio/vfscanf.o
 musl += stdio/vfwprintf.o
 libc += stdio/vfwscanf.o
@@ -1617,6 +1637,7 @@ musl += temp/__randname.o
 musl += temp/mkdtemp.o
 musl += temp/mkstemp.o
 musl += temp/mktemp.o
+musl += temp/mkostemp.o
 musl += temp/mkostemps.o
 
 libc += time/__asctime.o
@@ -1666,6 +1687,7 @@ musl += regex/tre-mem.o
 $(out)/musl/src/regex/tre-mem.o: CFLAGS += -UNDEBUG
 
 libc += pthread.o
+libc += pthread_barrier.o
 libc += libc.o
 libc += dlfcn.o
 libc += time.o
@@ -1697,6 +1719,8 @@ musl += fenv/fegetexceptflag.o
 musl += fenv/feholdexcept.o
 musl += fenv/fesetexceptflag.o
 musl += fenv/$(musl_arch)/fenv.o
+else
+musl += fenv/fenv.o
 endif
 
 musl += crypt/crypt_blowfish.o

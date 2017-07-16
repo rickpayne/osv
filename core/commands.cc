@@ -12,6 +12,8 @@
 
 #include <boost/config/warning_disable.hpp>
 #include <boost/spirit/include/qi.hpp>
+#include <boost/program_options.hpp>
+#include <osv/power.hh>
 #include <osv/commands.hh>
 #include <osv/align.hh>
 #include <sys/types.h>
@@ -90,17 +92,141 @@ parse_command_line_min(const std::string line, bool &ok)
 }
 
 /*
-If cmd starts with "runcript file", read content of file and
+Everything after first $ is assumed to be env var.
+So with AA=aa, "$AA" -> "aa", and "X$AA" => "Xaa"
+More than one $ is not supported, and "${AA}" is also not.
+*/
+void expand_environ_vars(std::string& word)
+{
+    size_t pos;
+    if ((pos = word.find_first_of('$')) != std::string::npos) {
+        std::string new_word = word.substr(0, pos);
+        std::string key = word.substr(pos+1);
+        auto tmp = getenv(key.c_str());
+        //debug("    new_word=%s, key=%s, tmp=%s\n", new_word.c_str(), key.c_str(), tmp);
+        if (tmp) {
+            new_word += tmp;
+        }
+        word = new_word;
+    }
+}
+
+/*
+Expand environ vars in each word.
+*/
+void expand_environ_vars(std::vector<std::vector<std::string>>& result)
+{
+    std::vector<std::vector<std::string>>::iterator cmd_iter;
+    std::vector<std::string>::iterator line_iter;
+    for (cmd_iter=result.begin(); cmd_iter!=result.end(); cmd_iter++) {
+        for (line_iter=cmd_iter->begin(); line_iter!=cmd_iter->end(); line_iter++) {
+            expand_environ_vars(*line_iter);
+        }
+    }
+}
+
+/*
+In each runscript line, first N args starting with - are options.
+Parse options and remove them from result.
+
+Options are applied immediately, just as in loader.cc parse_options().
+So if two scripts set the same environment variable, then the last one wins.
+Applying all options before running any command is also safer than trying to
+apply options for each script at script execution (second script would modify
+environment setup by the first script, causing a race).
+*/
+static void runscript_process_options(std::vector<std::vector<std::string> >& result) {
+    namespace bpo = boost::program_options;
+    namespace bpos = boost::program_options::command_line_style;
+    // don't allow --foo bar (require --foo=bar) so we can find the first non-option
+    // argument
+    int style = bpos::unix_style & ~(bpos::long_allow_next | bpos::short_allow_next);
+    bpo::options_description desc("OSv runscript options");
+    desc.add_options()
+        ("env", bpo::value<std::vector<std::string>>(), "set Unix-like environment variable (putenv())");
+
+    for (size_t ii=0; ii<result.size(); ii++) {
+        auto cmd = result[ii];
+        bpo::variables_map vars;
+
+        std::vector<const char*> args = { "dummy-string" };
+        // due to https://svn.boost.org/trac/boost/ticket/6991, we can't terminate
+        // command line parsing on the executable name, so we need to look for it
+        // ourselves
+        auto ac = cmd.size();
+        auto av = std::vector<const char*>();
+        av.reserve(ac);
+        for (auto& prm: cmd) {
+            av.push_back(prm.c_str());
+        }
+        auto nr_options = std::find_if(av.data(), av.data() + ac,
+                                       [](const char* arg) { return arg[0] != '-'; }) - av.data();
+        std::copy(av.data(), av.data() + nr_options, std::back_inserter(args));
+
+        try {
+            bpo::store(bpo::parse_command_line(args.size(), args.data(), desc, style), vars);
+        } catch(std::exception &e) {
+            std::cout << e.what() << '\n';
+            std::cout << desc << '\n';
+            osv::poweroff();
+        }
+        bpo::notify(vars);
+
+        if (vars.count("env")) {
+            for (auto t : vars["env"].as<std::vector<std::string>>()) {
+                size_t pos = t.find("?=");
+                std::string key, value;
+                if (std::string::npos == pos) {
+                    // the basic "KEY=value" syntax
+                    size_t pos2 = t.find("=");
+                    assert(std::string::npos != pos2);
+                    key = t.substr(0, pos2);
+                    value = t.substr(pos2+1);
+                    //debug("Setting in environment (def): %s=%s\n", key, value);
+                }
+                else {
+                    // "KEY?=value", makefile-like syntax, set variable only if not yet set
+                    key = t.substr(0, pos);
+                    value = t.substr(pos+2);
+                    if (nullptr != getenv(key.c_str())) {
+                        // key already used, do not overwrite it
+                        //debug("NOT setting in environment (makefile): %s=%s\n", key, value);
+                        key = "";
+                    }
+                    else {
+                        //debug("Setting in environment (makefile): %s=%s\n", key, value);
+                    }
+                }
+
+                if (key.length() > 0) {
+                    // we have something to set
+                    expand_environ_vars(value);
+                    debug("Setting in environment: %s=%s\n", key, value);
+                    setenv(key.c_str(), value.c_str(), 1);
+                }
+
+            }
+        }
+
+        cmd.erase(cmd.begin(), cmd.begin() + nr_options);
+        result[ii] = cmd;
+    }
+}
+
+/*
+If cmd starts with "runscript file", read content of file and
 return vector of all programs to be run.
 File can contain multiple commands per line.
 ok flag is set to false on parse error, and left unchanged otherwise.
 
 If cmd doesn't start with runscript, then vector with size 0 is returned.
 */
-std::vector<std::vector<std::string>> runscript_expand(const std::vector<std::string>& cmd, bool &ok)
+std::vector<std::vector<std::string>>
+runscript_expand(const std::vector<std::string>& cmd, bool &ok, bool &is_runscript)
 {
     std::vector<std::vector<std::string> > result2, result3;
     if (cmd[0] == "runscript") {
+        is_runscript = true;
         /*
         The cmd vector ends with additional ";" or "\0" element.
         */
@@ -112,6 +238,11 @@ std::vector<std::vector<std::string>> runscript_expand(const std::vector<std::st
         auto fn = cmd[1];
 
         std::ifstream in(fn);
+        if (!in.good()) {
+            printf("Failed to open runscript file '%s'.\n", fn.c_str());
+            ok = false;
+            return result2;
+        }
         std::string line;
         size_t line_num = 0;
         while (!in.eof()) {
@@ -125,9 +256,20 @@ std::vector<std::vector<std::string>> runscript_expand(const std::vector<std::st
                 ok = false;
                 return result2;
             }
+            // Replace env vars found inside script.
+            // process and remove options from command
+            runscript_process_options(result3);
+            // Options, script command and script command parameters can be set via env vars.
+            // Do this later than runscript_process_options, so that
+            // runscript with content "--env=PORT?=1111 /usr/lib/mpi_hello.so aaa $PORT ccc"
+            // will have argv[2] equal to final value of PORT env var.
+            expand_environ_vars(result3);
             result2.insert(result2.end(), result3.begin(), result3.end());
             line_num++;
         }
+    }
+    else {
+        is_runscript = false;
     }
     return result2;
 }
@@ -137,6 +279,8 @@ parse_command_line(const std::string line,  bool &ok)
 {
     std::vector<std::vector<std::string> > result, result2;
     result = parse_command_line_min(line, ok);
+    // First replace environ variables in input command line.
+    expand_environ_vars(result);
 
     /*
     If command starts with runscript, we need to read actual command to
@@ -144,13 +288,16 @@ parse_command_line(const std::string line,  bool &ok)
     */
     std::vector<std::vector<std::string>>::iterator cmd_iter;
     for (cmd_iter=result.begin(); ok && cmd_iter!=result.end(); ) {
-        result2 = runscript_expand(*cmd_iter, ok);
-        if (result2.size() > 0) {
+        bool is_runscript;
+        result2 = runscript_expand(*cmd_iter, ok, is_runscript);
+        if (is_runscript) {
             cmd_iter = result.erase(cmd_iter);
-            int pos;
-            pos = cmd_iter - result.begin();
-            result.insert(cmd_iter, result2.begin(), result2.end());
-            cmd_iter = result.begin() + pos + result2.size();
+            if (result2.size() > 0) {
+                int pos;
+                pos = cmd_iter - result.begin();
+                result.insert(cmd_iter, result2.begin(), result2.end());
+                cmd_iter = result.begin() + pos + result2.size();
+            }
         }
         else {
             cmd_iter++;

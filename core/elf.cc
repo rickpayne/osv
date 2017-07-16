@@ -360,9 +360,13 @@ Elf64_Note::Elf64_Note(void *_base, char *str)
     // The note section strings will include the trailing 0. std::string
     // doesn't like that very much, and comparisons against a string that is
     // constructed from this string will fail. Therefore the - 1 at the end
-    n_owner.assign(str, base[0] - 1);
+    if (base[0] > 0) {
+        n_owner.assign(str, base[0] -1);
+    }
     str = align_up(str + base[0], 4);
-    n_value.assign(str, base[1] - 1);
+    if (base[1] > 0) {
+        n_value.assign(str, base[1] - 1);
+    }
 }
 
 void object::load_segments()
@@ -823,6 +827,8 @@ dladdr_info object::lookup_addr(const void* addr)
     if (addr < _base || addr >= _end) {
         return ret;
     }
+    ret.fname = _pathname.c_str();
+    ret.base = _base;
     auto strtab = dynamic_ptr<char>(DT_STRTAB);
     auto symtab = dynamic_ptr<Elf64_Sym>(DT_SYMTAB);
     auto len = symtab_len();
@@ -849,8 +855,6 @@ dladdr_info object::lookup_addr(const void* addr)
     if (!best.symbol || addr > best.relocated_addr() + best.size()) {
         return ret;
     }
-    ret.fname = _pathname.c_str();
-    ret.base = _base;
     ret.sym = strtab + best.symbol->st_name;
     ret.addr = best.relocated_addr();
     return ret;

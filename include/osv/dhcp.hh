@@ -25,7 +25,7 @@
 extern "C" {
 void dhcp_start(bool wait);
 void dhcp_release();
-void dhcp_restart(bool wait);
+void dhcp_renew(bool wait);
 }
 
 namespace dhcp {
@@ -117,6 +117,13 @@ namespace dhcp {
             DHCP_REPLY = 2,
         };
 
+        enum dhcp_request_packet_type {
+            DHCP_REQUEST_INIT_REBOOT = 1,
+            DHCP_REQUEST_SELECTING = 2,
+            DHCP_REQUEST_RENEWING = 3,
+            DHCP_REQUEST_REBINDING = 4,
+        };
+
         dhcp_mbuf(bool attached = true, struct mbuf* m = nullptr);
         ~dhcp_mbuf();
 
@@ -129,7 +136,9 @@ namespace dhcp {
         void compose_request(struct ifnet* ifp,
                              u32 xid,
                              boost::asio::ip::address_v4 yip,
-                             boost::asio::ip::address_v4 sip);
+                             boost::asio::ip::address_v4 sip,
+                             dhcp_request_packet_type request_packet_type,
+                             std::string hostname);
         void compose_release(struct ifnet* ifp,
                              boost::asio::ip::address_v4 yip,
                              boost::asio::ip::address_v4 sip);
@@ -226,6 +235,7 @@ namespace dhcp {
 
         void discover();
         void release();
+        void renew();
         void process_packet(struct mbuf*);
         void state_discover(dhcp_mbuf &dm);
         void state_request(dhcp_mbuf &dm);
@@ -242,6 +252,8 @@ namespace dhcp {
         // Transaction id
         u32 _xid;
     };
+    // typedef for discover/renew functions
+    typedef void (dhcp_interface_state::*dhcp_interface_state_send_packet) (void);
 
     ///////////////////////////////////////////////////////////////////////////
 
@@ -256,6 +268,7 @@ namespace dhcp {
         void start(bool wait);
         // Send release packet for all DHCP IPs.
         void release();
+        void renew(bool wait);
 
         void dhcp_worker_fn();
         void queue_packet(struct mbuf* m);
@@ -270,6 +283,7 @@ namespace dhcp {
         // Wait for IP
         bool _have_ip;
         sched::thread * _waiter;
+        void _send_and_wait(bool wait, dhcp_interface_state_send_packet iface_func);
     };
 
 } // namespace dhcp
