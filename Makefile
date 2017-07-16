@@ -309,7 +309,7 @@ gcc-sysroot = $(if $(CROSS_PREFIX), --sysroot external/$(arch)/gcc.bin) \
 # To add something that will *not* be part of the main kernel, you can do:
 #
 #   mydir/*.o EXTRA_FLAGS = <MY_STUFF>
-EXTRA_FLAGS = -D__OSV_CORE__ -DOSV_KERNEL_BASE=$(kernel_base)
+EXTRA_FLAGS = -D__OSV_CORE__ -DOSV_KERNEL_BASE=$(kernel_base) -DOSV_LZKERNEL_BASE=$(lzkernel_base)
 EXTRA_LIBS =
 COMMON = $(autodepend) -g -Wall -Wno-pointer-arith $(CFLAGS_WERROR) -Wformat=0 -Wno-format-security \
 	-D __BSD_VISIBLE=1 -U _FORTIFY_SOURCE -fno-stack-protector $(INCLUDES) \
@@ -414,7 +414,17 @@ $(out)/loader-stripped.elf: $(out)/loader.elf
 
 ifeq ($(arch),x64)
 
+# kernel_base is where the kernel will be loaded after uncompression.
+# lzkernel_base is where the compressed kernel is loaded from disk.
+# As issue #872 explains, lzkernel_base must be chosen high enough for
+# (lzkernel_base - kernel_base) to be bigger than the kernel's size.
+# On the other hand, don't increase lzkernel_base too much, because it puts
+# a lower limit on the VM's RAM size.
+# Below we verify that the compiled kernel isn't too big given the current
+# setting of these paramters; Otherwise we recommend to increase lzkernel_base.
 kernel_base := 0x200000
+lzkernel_base := 0x1800000
+
 
 $(out)/boot.bin: arch/x64/boot16.ld $(out)/arch/x64/boot16.o
 	$(call quiet, $(LD) -o $@ -T $^, LD $@)
@@ -453,8 +463,8 @@ $(out)/fastlz/lzloader.o: fastlz/lzloader.cc | generated-headers
 
 $(out)/lzloader.elf: $(out)/loader-stripped.elf.lz.o $(out)/fastlz/lzloader.o arch/x64/lzloader.ld \
 	$(out)/fastlz/fastlz.o
-	$(call very-quiet, scripts/check-image-size.sh $(out)/loader-stripped.elf 23068672)
-	$(call quiet, $(LD) -o $@ \
+	$(call very-quiet, scripts/check-image-size.sh $(out)/loader-stripped.elf $(shell bash -c 'echo $$(($(lzkernel_base)-$(kernel_base)))'))
+	$(call quiet, $(LD) -o $@ --defsym=OSV_LZKERNEL_BASE=$(lzkernel_base) \
 		-Bdynamic --export-dynamic --eh-frame-hdr --enable-new-dtags \
 		-T arch/x64/lzloader.ld \
 		$(filter %.o, $^), LINK lzloader.elf)
@@ -567,6 +577,7 @@ bsd += bsd/sys/netinet/in.o
 bsd += bsd/sys/netinet/in_pcb.o
 bsd += bsd/sys/netinet/in_proto.o
 bsd += bsd/sys/netinet/in_mcast.o
+$(out)/bsd/sys/netinet/in_mcast.o: COMMON += -Wno-maybe-uninitialized
 bsd += bsd/sys/netinet/in_rmx.o
 bsd += bsd/sys/netinet/ip_id.o
 bsd += bsd/sys/netinet/ip_icmp.o
@@ -607,6 +618,7 @@ bsd += bsd/sys/xen/xenbus/xenbusb.o
 bsd += bsd/sys/xen/xenbus/xenbusb_front.o
 bsd += bsd/sys/dev/xen/netfront/netfront.o
 bsd += bsd/sys/dev/xen/blkfront/blkfront.o
+bsd += bsd/sys/dev/hyperv/vmbus/hyperv.o
 endif
 
 bsd += bsd/sys/dev/random/hash.o
@@ -810,9 +822,10 @@ drivers += drivers/vmxnet3-queues.o
 drivers += drivers/virtio-blk.o
 drivers += drivers/virtio-scsi.o
 drivers += drivers/virtio-rng.o
-drivers += drivers/kvmclock.o drivers/xenclock.o
+drivers += drivers/kvmclock.o drivers/xenclock.o drivers/hypervclock.o
 drivers += drivers/acpi.o
 drivers += drivers/hpet.o
+drivers += drivers/rtc.o
 drivers += drivers/xenfront.o drivers/xenfront-xenbus.o drivers/xenfront-blk.o
 drivers += drivers/pvpanic.o
 drivers += drivers/ahci.o
