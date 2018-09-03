@@ -513,6 +513,13 @@ $(out)/bsd/sys/netinet/in.o: COMMON+=-fno-strict-aliasing
 
 $(out)/bsd/sys/cddl/contrib/opensolaris/uts/common/fs/zfs/metaslab.o: COMMON+=-Wno-tautological-compare
 
+# A lot of the BSD code used to be C code, which commonly bzero()ed or
+# memcpy()ed objects. In C++, this should not be done (objects have
+# constructors and assignments), and gcc 8 starts to warn about it.
+# Instead of fixing all these occurances, let's ask gcc to ignore this
+# warning. At least for now.
+$(out)/bsd/%.o: CXXFLAGS += -Wno-class-memaccess
+
 bsd  = bsd/init.o
 bsd += bsd/net.o
 bsd += bsd/$(arch)/machine/in_cksum.o
@@ -1381,6 +1388,7 @@ musl += network/getservbyport.o
 libc += network/getifaddrs.o
 libc += network/if_nameindex.o
 musl += network/if_freenameindex.o
+libc += network/res_init.o
 
 musl += prng/rand.o
 musl += prng/rand_r.o
@@ -1393,6 +1401,7 @@ musl += prng/lrand48.o
 musl += prng/mrand48.o
 musl += prng/seed48.o
 musl += prng/srand48.o
+libc += random.o
 
 libc += process/execve.o
 libc += process/execle.o
@@ -1617,6 +1626,7 @@ libc += string/wcscat.o
 musl += string/wcschr.o
 musl += string/wcscmp.o
 libc += string/wcscpy.o
+libc += string/__wcscpy_chk.o
 musl += string/wcscspn.o
 musl += string/wcsdup.o
 musl += string/wcslen.o
@@ -1740,6 +1750,7 @@ musl += crypt/crypt_md5.o
 musl += crypt/crypt_r.o
 musl += crypt/crypt_sha256.o
 musl += crypt/crypt_sha512.o
+libc += crypt/encrypt.o
 
 #include $(src)/fs/build.mk:
 
@@ -1768,6 +1779,11 @@ fs_objs += ramfs/ramfs_vfsops.o \
 
 fs_objs += devfs/devfs_vnops.o \
 	devfs/device.o
+
+fs_objs += rofs/rofs_vfsops.o \
+	rofs/rofs_vnops.o \
+	rofs/rofs_cache.o \
+	rofs/rofs_common.o
 
 fs_objs += procfs/procfs_vnops.o
 
@@ -1873,6 +1889,11 @@ $(out)/libenviron.so: $(environ_sources)
 	$(makedir)
 	 $(call quiet, $(CC) $(CFLAGS) -shared -o $(out)/libenviron.so $(environ_sources), CC libenviron.so)
 
+$(out)/libvdso.so: libc/vdso/vdso.c
+	$(makedir)
+	$(call quiet, $(CC) $(CFLAGS) -c -fPIC -o $(out)/libvdso.o libc/vdso/vdso.c, CC libvdso.o)
+	$(call quiet, $(LD) -shared -fPIC -o $(out)/libvdso.so $(out)/libvdso.o --version-script=libc/vdso/vdso.version, LINK libvdso.so)
+
 bootfs_manifest ?= bootfs.manifest.skel
 
 # If parameter "bootfs_manifest" has been changed since the last make,
@@ -1885,7 +1906,7 @@ $(bootfs_manifest_dep): phony
 	fi
 
 $(out)/bootfs.bin: scripts/mkbootfs.py $(bootfs_manifest) $(bootfs_manifest_dep) $(tools:%=$(out)/%) \
-		$(out)/zpool.so $(out)/zfs.so $(out)/libenviron.so
+		$(out)/zpool.so $(out)/zfs.so $(out)/libenviron.so $(out)/libvdso.so
 	$(call quiet, olddir=`pwd`; cd $(out); $$olddir/scripts/mkbootfs.py -o bootfs.bin -d bootfs.bin.d -m $$olddir/$(bootfs_manifest) \
 		-D jdkbase=$(jdkbase) -D gccbase=$(gccbase) -D \
 		glibcbase=$(glibcbase) -D miscbase=$(miscbase), MKBOOTFS $@)
