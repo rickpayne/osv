@@ -345,12 +345,12 @@ netisr_clearqdrops(const struct netisr_handler *nhp)
 
 	proto = nhp->nh_proto;
 	KASSERT(proto < NETISR_MAXPROT,
-	    ("%s(%u): protocol too big for %s", __func__, proto, name));
+	    ("%s(%u): protocol too big for %s", __func__, proto, nhp->nh_name));
 
 	NETISR_WLOCK();
 	KASSERT(netisr_proto[proto].np_handler != NULL,
 	    ("%s(%u): protocol not registered for %s", __func__, proto,
-	    name));
+	    nhp->nh_name));
 
 	npwp = &main_nws.nws_work[proto];
 	npwp->nw_qdrops = 0;
@@ -369,12 +369,12 @@ netisr_getqdrops(const struct netisr_handler *nhp, u_int64_t *qdropp)
 	*qdropp = 0;
 	proto = nhp->nh_proto;
 	KASSERT(proto < NETISR_MAXPROT,
-	    ("%s(%u): protocol too big for %s", __func__, proto, name));
+	    ("%s(%u): protocol too big for %s", __func__, proto, nhp->nh_name));
 
 	NETISR_RLOCK(&tracker);
 	KASSERT(netisr_proto[proto].np_handler != NULL,
 	    ("%s(%u): protocol not registered for %s", __func__, proto,
-	    name));
+	    nhp->nh_name));
 
     npwp = &main_nws.nws_work[proto];
     *qdropp += npwp->nw_qdrops;
@@ -391,12 +391,12 @@ netisr_getqlimit(const struct netisr_handler *nhp, u_int *qlimitp)
 
 	proto = nhp->nh_proto;
 	KASSERT(proto < NETISR_MAXPROT,
-	    ("%s(%u): protocol too big for %s", __func__, proto, name));
+	    ("%s(%u): protocol too big for %s", __func__, proto, nhp->nh_name));
 
 	NETISR_RLOCK(&tracker);
 	KASSERT(netisr_proto[proto].np_handler != NULL,
 	    ("%s(%u): protocol not registered for %s", __func__, proto,
-	    name));
+	    nhp->nh_name));
 	*qlimitp = netisr_proto[proto].np_qlimit;
 	NETISR_RUNLOCK(&tracker);
 }
@@ -417,12 +417,12 @@ netisr_setqlimit(const struct netisr_handler *nhp, u_int qlimit)
 
 	proto = nhp->nh_proto;
 	KASSERT(proto < NETISR_MAXPROT,
-	    ("%s(%u): protocol too big for %s", __func__, proto, name));
+	    ("%s(%u): protocol too big for %s", __func__, proto, nhp->nh_name));
 
 	NETISR_WLOCK();
 	KASSERT(netisr_proto[proto].np_handler != NULL,
 	    ("%s(%u): protocol not registered for %s", __func__, proto,
-	    name));
+	    nhp->nh_name));
 
 	netisr_proto[proto].np_qlimit = qlimit;
 	npwp = &main_nws.nws_work[proto];
@@ -468,12 +468,12 @@ netisr_unregister(const struct netisr_handler *nhp)
 
 	proto = nhp->nh_proto;
 	KASSERT(proto < NETISR_MAXPROT,
-	    ("%s(%u): protocol too big for %s", __func__, proto, name));
+	    ("%s(%u): protocol too big for %s", __func__, proto, nhp->nh_name));
 
 	NETISR_WLOCK();
 	KASSERT(netisr_proto[proto].np_handler != NULL,
 	    ("%s(%u): protocol not registered for %s", __func__, proto,
-	    name));
+	    nhp->nh_name));
 
 	netisr_proto[proto].np_name = NULL;
 	netisr_proto[proto].np_handler = NULL;
@@ -875,7 +875,6 @@ netisr_start_swi(void)
 void netisr_init(void *arg)
 {
 	NETISR_LOCK_INIT();
-	bzero(&main_nws, sizeof(main_nws));
 	netisr_maxthreads = 1;
 	if (netisr_defaultqlimit > netisr_maxqlimit) {
 		printf("netisr_init: forcing defaultqlimit from %d to %d\n",

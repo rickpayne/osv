@@ -11,6 +11,7 @@
 #include "fs/fs.hh"
 #include <vector>
 #include <map>
+#include <stack>
 #include <memory>
 #include <unordered_set>
 #include <osv/types.h>
@@ -188,6 +189,8 @@ enum {
     DT_FINI_ARRAY = 26, // d_ptr Pointer to an array of pointers to termination functions.
     DT_INIT_ARRAYSZ = 27, // d_val Size, in bytes, of the array of initialization functions.
     DT_FINI_ARRAYSZ = 28, // d_val Size, in bytes, of the array of termination functions.
+    DT_FLAGS = 30, // value is various flags, bits from DF_*.
+    DT_FLAGS_1 = 0x6ffffffb, // value is various flags, bits from DF_1_*.
     DT_LOOS = 0x60000000, // Defines a range of dynamic table tags that are reserved for
       // environment-specific use.
     DT_HIOS = 0x6FFFFFFF, //
@@ -195,6 +198,13 @@ enum {
       // processor-specific use.
     DT_HIPROC = 0x7FFFFFFF, //
     DT_GNU_HASH = 0x6ffffef5,
+};
+
+enum {
+    DF_BIND_NOW = 0x8,
+};
+enum {
+    DF_1_NOW = 0x1,
 };
 
 enum {
@@ -334,7 +344,7 @@ public:
     const std::vector<Elf64_Phdr> *phdrs();
     std::string soname();
     std::string pathname();
-    void run_init_funcs();
+    void run_init_funcs(int argc, char** argv);
     void run_fini_funcs();
     template <typename T = void>
     T* lookup(const char* name);
@@ -368,7 +378,7 @@ private:
     std::vector<const char*> dynamic_str_array(unsigned tag);
     Elf64_Dyn& dynamic_tag(unsigned tag);
     Elf64_Dyn* _dynamic_tag(unsigned tag);
-    symbol_module symbol(unsigned idx);
+    symbol_module symbol(unsigned idx, bool ignore_missing = false);
     symbol_module symbol_other(unsigned idx);
     Elf64_Xword symbol_tls_module(unsigned idx);
     void relocate_rela();
@@ -418,7 +428,7 @@ protected:
     // The return value is true on success, false on failure.
     bool arch_relocate_rela(u32 type, u32 sym, void *addr,
                             Elf64_Sxword addend);
-    bool arch_relocate_jump_slot(u32 sym, void *addr, Elf64_Sxword addend);
+    bool arch_relocate_jump_slot(u32 sym, void *addr, Elf64_Sxword addend, bool ignore_missing = false);
     size_t static_tls_end() {
         if (is_core()) {
             return 0;
@@ -523,9 +533,22 @@ public:
      * \param[in] extra_path  Additional directories to search in addition to
      *                        the default search path which is set with
      *                        set_search_path().
+     * \param[in] delay_init  If true the init functions in the library and its
+     *                        dependencies will not be executed until some later
+     *                        time when the init_library() is called. By default
+     *                        the init functions are executed right away.
      */
     std::shared_ptr<elf::object>
-    get_library(std::string lib, std::vector<std::string> extra_path = {});
+    get_library(std::string lib, std::vector<std::string> extra_path = {}, bool delay_init = false);
+
+    /**
+     * Execute init functions of the library itself and its dependencies.
+     *
+     * Any arguments passed in are relayed to the init functions. Right now
+     * the only place that explicitly invokes init_library is application::main()
+     * method which also passes any argv passed to the application.
+     */
+    void init_library(int argc = 0, char **argv = nullptr);
 
     /**
      * Set the default search path for get_library().
@@ -596,6 +619,9 @@ private:
 
     friend elf::file::~file();
     friend class object;
+    // this allows the objects resolved by get_library() get initialized
+    // by init_library() at arbitrary time later - the delayed initialization scenario
+    std::stack<std::vector<std::shared_ptr<object>>> _loaded_objects_stack;
 };
 
 void create_main_program();
