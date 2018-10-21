@@ -132,6 +132,9 @@ quiet = $(if $V, $1, @echo " $2"; $1)
 very-quiet = $(if $V, $1, @$1)
 
 all: $(out)/loader.img links
+ifeq ($(arch),x64)
+all: $(out)/loader.bin
+endif
 .PHONY: all
 
 links:
@@ -369,7 +372,7 @@ $(out)/%.o: %.c | generated-headers
 
 $(out)/%.o: %.S
 	$(makedir)
-	$(call quiet, $(CXX) $(CXXFLAGS) $(ASFLAGS) -c -o $@ $<, AS $*.s)
+	$(call quiet, $(CXX) $(CXXFLAGS) $(ASFLAGS) -c -o $@ $<, AS $*.S)
 
 $(out)/%.o: %.s
 	$(makedir)
@@ -416,16 +419,10 @@ ifeq ($(arch),x64)
 
 # kernel_base is where the kernel will be loaded after uncompression.
 # lzkernel_base is where the compressed kernel is loaded from disk.
-# As issue #872 explains, lzkernel_base must be chosen high enough for
-# (lzkernel_base - kernel_base) to be bigger than the kernel's size.
-# On the other hand, don't increase lzkernel_base too much, because it puts
-# a lower limit on the VM's RAM size.
-# Below we verify that the compiled kernel isn't too big given the current
-# setting of these paramters; Otherwise we recommend to increase lzkernel_base.
 kernel_base := 0x200000
-lzkernel_base := 0x1800000
+lzkernel_base := 0x100000
 
-
+$(out)/arch/x64/boot16.o: $(out)/lzloader.elf
 $(out)/boot.bin: arch/x64/boot16.ld $(out)/arch/x64/boot16.o
 	$(call quiet, $(LD) -o $@ -T $^, LD $@)
 
@@ -438,11 +435,13 @@ $(out)/loader.img: $(out)/boot.bin $(out)/lzloader.elf
 	$(call quiet, scripts/imgedit.py setsize "-f raw $@" $(image-size), IMGEDIT $@)
 	$(call quiet, scripts/imgedit.py setargs "-f raw $@" $(cmdline), IMGEDIT $@)
 
+$(out)/arch/x64/boot32.o: $(out)/lzloader.elf
 $(out)/loader.bin: $(out)/arch/x64/boot32.o arch/x64/loader32.ld
 	$(call quiet, $(LD) -nostartfiles -static -nodefaultlibs -o $@ \
 	                $(filter-out %.bin, $(^:%.ld=-T %.ld)), LD $@)
 
-$(out)/arch/x64/boot32.o: $(out)/loader.elf
+$(out)/arch/x64/boot32.o: $(out)/lzloader.elf
+$(out)/arch/x64/boot32.o: ASFLAGS += -I$(out)
 
 $(out)/fastlz/fastlz.o:
 	$(makedir)
@@ -462,9 +461,9 @@ $(out)/fastlz/lzloader.o: fastlz/lzloader.cc | generated-headers
 
 $(out)/lzloader.elf: $(out)/loader-stripped.elf.lz.o $(out)/fastlz/lzloader.o arch/x64/lzloader.ld \
 	$(out)/fastlz/fastlz.o
-	$(call very-quiet, scripts/check-image-size.sh $(out)/loader-stripped.elf $(shell bash -c 'echo $$(($(lzkernel_base)-$(kernel_base)))'))
+	$(call very-quiet, scripts/check-image-size.sh $(out)/loader-stripped.elf)
 	$(call quiet, $(LD) -o $@ --defsym=OSV_LZKERNEL_BASE=$(lzkernel_base) \
-		-Bdynamic --export-dynamic --eh-frame-hdr --enable-new-dtags \
+		-Bdynamic --export-dynamic --eh-frame-hdr --enable-new-dtags -z max-page-size=4096 \
 		-T arch/x64/lzloader.ld \
 		$(filter %.o, $^), LINK lzloader.elf)
 	$(call quiet, truncate -s %32768 $@, ALIGN lzloader.elf)
@@ -1870,9 +1869,9 @@ $(out)/loader.elf: $(stage1_targets) arch/$(arch)/loader.ld $(out)/bootfs.o
 		-Bdynamic --export-dynamic --eh-frame-hdr --enable-new-dtags \
 	    $(^:%.ld=-T %.ld) \
 	    --whole-archive \
-	      $(libstdc++.a) $(libgcc.a) $(libgcc_eh.a) \
+	      $(libstdc++.a) $(libgcc_eh.a) \
 	      $(boost-libs) \
-	    --no-whole-archive, \
+	    --no-whole-archive $(libgcc.a), \
 		LINK loader.elf)
 	@# Build libosv.so matching this loader.elf. This is not a separate
 	@# rule because that caused bug #545.
