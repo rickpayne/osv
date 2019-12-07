@@ -50,11 +50,8 @@ static u8 get_pvclock_flags()
 kvmclock::kvmclock()
     : _pvclock(get_pvclock_flags())
 {
-    auto wall_time_msr = (_new_kvmclock_msrs) ?
-                         msr::KVM_WALL_CLOCK_NEW : msr::KVM_WALL_CLOCK;
     _wall = new pvclock_wall_clock;
     memset(_wall, 0, sizeof(*_wall));
-    processor::wrmsr(wall_time_msr, mmu::virt_to_phys(_wall));
 }
 
 void kvmclock::init_on_cpu()
@@ -79,6 +76,9 @@ bool kvmclock::probe()
 
 u64 kvmclock::wall_clock_boot()
 {
+    auto wall_time_msr = (_new_kvmclock_msrs) ?
+                         msr::KVM_WALL_CLOCK_NEW : msr::KVM_WALL_CLOCK;
+    processor::wrmsr(wall_time_msr, mmu::virt_to_phys(_wall));
     return _pvclock.wall_clock_boot(_wall);
 }
 
