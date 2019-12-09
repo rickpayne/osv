@@ -10,7 +10,6 @@
 
 #include "drivers/virtio.hh"
 #include "drivers/virtio-blk.hh"
-#include "drivers/pci-device.hh"
 #include <osv/interrupt.hh>
 
 #include <osv/mempool.hh>
@@ -24,6 +23,7 @@
 
 #include <osv/sched.hh>
 #include "osv/trace.hh"
+#include "osv/aligned_new.hh"
 
 #include <osv/device.h>
 #include <osv/bio.h>
@@ -100,7 +100,7 @@ struct driver blk_driver = {
 
 bool blk::ack_irq()
 {
-    auto isr = virtio_conf_readb(VIRTIO_PCI_ISR);
+    auto isr = _dev.read_and_ack_isr();
     auto queue = get_virt_queue(0);
 
     if (isr) {
@@ -112,33 +112,52 @@ bool blk::ack_irq()
 
 }
 
-blk::blk(pci::device& pci_dev)
-    : virtio_driver(pci_dev), _ro(false)
+blk::blk(virtio_device& virtio_dev)
+    : virtio_driver(virtio_dev), _ro(false)
 {
-
     _driver_name = "virtio-blk";
     _id = _instance++;
-    virtio_i("VIRTIO BLK INSTANCE %d", _id);
+    virtio_i("VIRTIO BLK INSTANCE %d\n", _id);
 
+    // Steps 4, 5 & 6 - negotiate and confirm features
     setup_features();
     read_config();
+
+    // Step 7 - generic init of virtqueues
+    probe_virt_queues();
 
     //register the single irq callback for the block
     sched::thread* t = sched::thread::make([this] { this->req_done(); },
             sched::thread::attr().name("virtio-blk"));
     t->start();
     auto queue = get_virt_queue(0);
-    if (pci_dev.is_msix()) {
-        _msi.easy_register({ { 0, [=] { queue->disable_interrupts(); }, t } });
-    } else {
-        _irq.reset(new pci_interrupt(pci_dev,
-                                     [=] { return ack_irq(); },
-                                     [=] { t->wake(); }));
-    }
+
+    interrupt_factory int_factory;
+    int_factory.register_msi_bindings = [queue, t](interrupt_manager &msi) {
+        msi.easy_register( {{ 0, [=] { queue->disable_interrupts(); }, t }});
+    };
+
+    int_factory.create_pci_interrupt = [this,t](pci::device &pci_dev) {
+        return new pci_interrupt(
+            pci_dev,
+            [=] { return this->ack_irq(); },
+            [=] { t->wake(); });
+    };
+
+#ifndef AARCH64_PORT_STUB
+    int_factory.create_gsi_edge_interrupt = [this,t]() {
+        return new gsi_edge_interrupt(
+                _dev.get_irq(),
+                [=] { if (this->ack_irq()) t->wake(); });
+    };
+#endif
+
+    _dev.register_interrupt(int_factory);
 
     // Enable indirect descriptor
     queue->set_use_indirect(true);
 
+    // Step 8
     add_dev_status(VIRTIO_CONFIG_S_DRIVER_OK);
 
     struct blk_priv* prv;
@@ -161,24 +180,34 @@ blk::~blk()
     // including the thread objects and their stack
 }
 
+#define READ_CONFIGURATION_FIELD(config,field_name,field) \
+    virtio_conf_read(offsetof(config,field_name), &field, sizeof(field));
+
 void blk::read_config()
 {
-    //read all of the block config (including size, mce, topology,..) in one shot
-    virtio_conf_read(virtio_pci_config_offset(), &_config, sizeof(_config));
-
+    READ_CONFIGURATION_FIELD(blk_config,capacity,_config.capacity)
     trace_virtio_blk_read_config_capacity(_config.capacity);
 
-    if (get_guest_feature_bit(VIRTIO_BLK_F_SIZE_MAX))
+    if (get_guest_feature_bit(VIRTIO_BLK_F_SIZE_MAX)) {
+        READ_CONFIGURATION_FIELD(blk_config,size_max,_config.size_max)
         trace_virtio_blk_read_config_size_max(_config.size_max);
-    if (get_guest_feature_bit(VIRTIO_BLK_F_SEG_MAX))
+    }
+    if (get_guest_feature_bit(VIRTIO_BLK_F_SEG_MAX)) {
+        READ_CONFIGURATION_FIELD(blk_config,seg_max,_config.seg_max)
         trace_virtio_blk_read_config_seg_max(_config.seg_max);
+    }
     if (get_guest_feature_bit(VIRTIO_BLK_F_GEOMETRY)) {
+        READ_CONFIGURATION_FIELD(blk_config,geometry,_config.geometry)
         trace_virtio_blk_read_config_geometry((u32)_config.geometry.cylinders, (u32)_config.geometry.heads, (u32)_config.geometry.sectors);
     }
-    if (get_guest_feature_bit(VIRTIO_BLK_F_BLK_SIZE))
+    if (get_guest_feature_bit(VIRTIO_BLK_F_BLK_SIZE)) {
+        READ_CONFIGURATION_FIELD(blk_config,blk_size,_config.blk_size)
         trace_virtio_blk_read_config_blk_size(_config.blk_size);
+    }
     if (get_guest_feature_bit(VIRTIO_BLK_F_TOPOLOGY)) {
-        trace_virtio_blk_read_config_topology((u32)_config.physical_block_exp, (u32)_config.alignment_offset, (u32)_config.min_io_size, (u32)_config.opt_io_size);
+        READ_CONFIGURATION_FIELD(blk_config,topology,_config.topology)
+        trace_virtio_blk_read_config_topology((u32)_config.topology.physical_block_exp, (u32)_config.topology.alignment_offset,
+          (u32)_config.topology.min_io_size, (u32)_config.topology.opt_io_size);
     }
     if (get_guest_feature_bit(VIRTIO_BLK_F_CONFIG_WCE))
         trace_virtio_blk_read_config_wce((u32)_config.wce);
@@ -226,12 +255,12 @@ void blk::req_done()
     }
 }
 
+static const int sector_size = 512;
+
 int64_t blk::size()
 {
-    return _config.capacity * _config.blk_size;
+    return _config.capacity * sector_size;
 }
-
-static const int sector_size = 512;
 
 int blk::make_request(struct bio* bio)
 {
@@ -240,9 +269,11 @@ int blk::make_request(struct bio* bio)
 
         if (!bio) return EIO;
 
-        if (bio->bio_bcount/mmu::page_size + 1 > _config.seg_max) {
-            trace_virtio_blk_make_request_seg_max(bio->bio_bcount, _config.seg_max);
-            return EIO;
+        if (get_guest_feature_bit(VIRTIO_BLK_F_SEG_MAX)) {
+            if (bio->bio_bcount/mmu::page_size + 1 > _config.seg_max) {
+                trace_virtio_blk_make_request_seg_max(bio->bio_bcount, _config.seg_max);
+                return EIO;
+            }
         }
 
         auto* queue = get_virt_queue(0);
@@ -308,7 +339,7 @@ u32 blk::get_driver_features()
 
 hw_driver* blk::probe(hw_device* dev)
 {
-    return virtio::probe<blk, VIRTIO_BLK_DEVICE_ID>(dev);
+    return virtio::probe<blk, VIRTIO_ID_BLOCK>(dev);
 }
 
 }

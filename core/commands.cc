@@ -12,7 +12,6 @@
 
 #include <boost/config/warning_disable.hpp>
 #include <boost/spirit/include/qi.hpp>
-#include <boost/program_options.hpp>
 #include <osv/power.hh>
 #include <osv/commands.hh>
 #include <osv/align.hh>
@@ -40,11 +39,11 @@ struct command : qi::grammar<sciter,
                        ("\\r", '\r')("\\t", '\t')("\\v", '\v')("\\\\", '\\')
                        ("\\\'", '\'')("\\\"", '\"');
 
-        string %= qi::no_skip[+(unesc_char | (char_ - ' ' - ';' - '&'))];
+        string %= qi::no_skip[+(unesc_char | (char_ - ' ' - ';' - '&' - '!'))];
         quoted_string %= lexeme['"' >> *(unesc_char | (char_ - '"')) >> '"'];
 
         start %= ((quoted_string | string) % *space) >>
-                (char_(';') | qi::string("&!") | char_('&') | qi::eoi);
+                (char_(';') | qi::string("&!") | char_('&') | char_('!') | qi::eoi);
     }
 
     qi::rule<sciter, std::string(), ascii::space_type> string;
@@ -135,76 +134,58 @@ Applying all options before running any command is also safer than trying to
 apply options for each script at script execution (second script would modify
 environment setup by the first script, causing a race).
 */
-static void runscript_process_options(std::vector<std::vector<std::string> >& result) {
-    namespace bpo = boost::program_options;
-    namespace bpos = boost::program_options::command_line_style;
-    // don't allow --foo bar (require --foo=bar) so we can find the first non-option
-    // argument
-    int style = bpos::unix_style & ~(bpos::long_allow_next | bpos::short_allow_next);
-    bpo::options_description desc("OSv runscript options");
-    desc.add_options()
-        ("env", bpo::value<std::vector<std::string>>(), "set Unix-like environment variable (putenv())");
+static void runscript_process_options_usage(std::string &message) {
+    std::cout << message << "\n";
+    std::cout << "OSv runscript options:\n";
+    std::cout << "  --env=arg             set Unix-like environment variable (putenv())\n";
+    osv::poweroff();
+}
 
+static void runscript_process_options(std::vector<std::vector<std::string> >& result) {
     for (size_t ii=0; ii<result.size(); ii++) {
         auto cmd = result[ii];
-        bpo::variables_map vars;
 
-        std::vector<const char*> args = { "dummy-string" };
-        // due to https://svn.boost.org/trac/boost/ticket/6991, we can't terminate
-        // command line parsing on the executable name, so we need to look for it
-        // ourselves
-        auto ac = cmd.size();
-        auto av = std::vector<const char*>();
-        av.reserve(ac);
-        for (auto& prm: cmd) {
-            av.push_back(prm.c_str());
-        }
-        auto nr_options = std::find_if(av.data(), av.data() + ac,
-                                       [](const char* arg) { return arg[0] != '-'; }) - av.data();
-        std::copy(av.data(), av.data() + nr_options, std::back_inserter(args));
+        int nr_options = 0;
+        const char *env_prefix = "--env=";
+        for (auto arg : cmd) {
+            if (arg.empty() || arg[0] != '-') {
+                break;
+            }
+            nr_options++;
 
-        try {
-            bpo::store(bpo::parse_command_line(args.size(), args.data(), desc, style), vars);
-        } catch(std::exception &e) {
-            std::cout << e.what() << '\n';
-            std::cout << desc << '\n';
-            osv::poweroff();
-        }
-        bpo::notify(vars);
+            if (arg.find(env_prefix) != 0) {
+                auto message = std::string("unrecognised option '") + arg + "'";
+                runscript_process_options_usage(message);
+            }
 
-        if (vars.count("env")) {
-            for (auto t : vars["env"].as<std::vector<std::string>>()) {
-                size_t pos = t.find("?=");
-                std::string key, value;
-                if (std::string::npos == pos) {
-                    // the basic "KEY=value" syntax
-                    size_t pos2 = t.find("=");
-                    assert(std::string::npos != pos2);
-                    key = t.substr(0, pos2);
-                    value = t.substr(pos2+1);
-                    //debug("Setting in environment (def): %s=%s\n", key, value);
+            auto t = arg.substr(strlen(env_prefix),std::string::npos);
+            size_t pos = t.find("?=");
+            std::string key, value;
+            if (std::string::npos == pos) {
+                // the basic "KEY=value" syntax
+                size_t pos2 = t.find("=");
+                if (std::string::npos == pos2) {
+                    auto message = std::string("expected 'KEY(?)=value' but instead got '") + arg + "'";
+                    runscript_process_options_usage(message);
                 }
-                else {
-                    // "KEY?=value", makefile-like syntax, set variable only if not yet set
-                    key = t.substr(0, pos);
-                    value = t.substr(pos+2);
-                    if (nullptr != getenv(key.c_str())) {
-                        // key already used, do not overwrite it
-                        //debug("NOT setting in environment (makefile): %s=%s\n", key, value);
-                        key = "";
-                    }
-                    else {
-                        //debug("Setting in environment (makefile): %s=%s\n", key, value);
-                    }
+                key = t.substr(0, pos2);
+                value = t.substr(pos2+1);
+            }
+            else {
+                // "KEY?=value", makefile-like syntax, set variable only if not yet set
+                key = t.substr(0, pos);
+                value = t.substr(pos+2);
+                if (nullptr != getenv(key.c_str())) {
+                    // key already used, do not overwrite it
+                    key = "";
                 }
+            }
 
-                if (key.length() > 0) {
-                    // we have something to set
-                    expand_environ_vars(value);
-                    debug("Setting in environment: %s=%s\n", key, value);
-                    setenv(key.c_str(), value.c_str(), 1);
-                }
-
+            if (key.length() > 0) {
+                // we have something to set
+                expand_environ_vars(value);
+                debug("Setting in environment: %s=%s\n", key, value);
+                setenv(key.c_str(), value.c_str(), 1);
             }
         }
 
@@ -249,7 +230,7 @@ runscript_expand(const std::vector<std::string>& cmd, bool &ok, bool &is_runscri
             getline(in, line);
             bool ok2;
             result3 = parse_command_line_min(line, ok2);
-            debug("runscript expand fn='%s' line=%d '%s'\n", fn.c_str(), line_num, line.c_str());
+            printf("runscript expand fn='%s' line=%d '%s'\n", fn.c_str(), line_num, line.c_str());
             if (ok2 == false) {
                 printf("Failed expanding runscript file='%s' line=%d '%s'.\n", fn.c_str(), line_num, line.c_str());
                 result2.clear();

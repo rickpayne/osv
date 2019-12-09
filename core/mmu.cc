@@ -91,12 +91,12 @@ phys pte_level_mask(unsigned level)
     return ~((phys(1) << shift) - 1);
 }
 
+static void *elf_phys_start = (void*)OSV_KERNEL_BASE;
 void* phys_to_virt(phys pa)
 {
-    // The ELF is mapped 1:1
     void* phys_addr = reinterpret_cast<void*>(pa);
-    if ((phys_addr >= elf_start) && (phys_addr < elf_start + elf_size)) {
-        return phys_addr;
+    if ((phys_addr >= elf_phys_start) && (phys_addr < elf_phys_start + elf_size)) {
+        return (void*)(phys_addr + OSV_KERNEL_VM_SHIFT);
     }
 
     return phys_mem + pa;
@@ -106,9 +106,8 @@ phys virt_to_phys_pt(void* virt);
 
 phys virt_to_phys(void *virt)
 {
-    // The ELF is mapped 1:1
     if ((virt >= elf_start) && (virt < elf_start + elf_size)) {
-        return reinterpret_cast<phys>(virt);
+        return reinterpret_cast<phys>((void*)(virt - OSV_KERNEL_VM_SHIFT));
     }
 
 #if CONF_debug_memory
@@ -1680,6 +1679,15 @@ file_vma::file_vma(addr_range range, unsigned perm, unsigned flags, fileref file
     if (err != 0) {
         throw make_error(err);
     }
+
+    struct stat st;
+    err = _file->stat(&st);
+    if (err != 0) {
+        throw make_error(err);
+    }
+
+    _file_inode = st.st_ino;
+    _file_dev_id = st.st_dev;
 }
 
 void file_vma::fault(uintptr_t addr, exception_frame *ef)
@@ -1844,6 +1852,18 @@ void linear_map(void* _virt, phys addr, size_t size,
 
 void free_initial_memory_range(uintptr_t addr, size_t size)
 {
+    if (!size) {
+        return;
+    }
+    // Most of the time the kernel code references memory using
+    // virtual addresses. However some allocated system structures
+    // like page tables use physical addresses.
+    // For that reason we skip the very 1st page of physical memory
+    // so that allocated memory areas NEVER map to physical address 0.
+    if (!addr) {
+        ++addr;
+        --size;
+    }
     memory::free_initial_memory_range(phys_cast<void>(addr), size);
 }
 
@@ -1911,7 +1931,9 @@ std::string procfs_maps()
             osv::fprintf(os, "%x-%x %c%c%c%c ", vma.start(), vma.end(), read, write, execute, priv);
             if (vma.flags() & mmap_file) {
                 const file_vma &f_vma = static_cast<file_vma&>(vma);
-                osv::fprintf(os, "%08x 00:00 0 %s\n", f_vma.offset(), f_vma.file()->f_dentry->d_path);
+                unsigned dev_id_major = major(f_vma.file_dev_id());
+                unsigned dev_id_minor = minor(f_vma.file_dev_id());
+                osv::fprintf(os, "%08x %02x:%02x %ld %s\n", f_vma.offset(), dev_id_major, dev_id_minor, f_vma.file_inode(), f_vma.file()->f_dentry->d_path);
             } else {
                 osv::fprintf(os, "00000000 00:00 0\n");
             }

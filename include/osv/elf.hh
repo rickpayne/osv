@@ -14,6 +14,7 @@
 #include <stack>
 #include <memory>
 #include <unordered_set>
+#include <unordered_map>
 #include <osv/types.h>
 #include <atomic>
 
@@ -111,6 +112,7 @@ enum {
     PT_GNU_EH_FRAME = 0x6474e550, // Exception handling records
     PT_GNU_STACK = 0x6474e551, // Stack permissions record
     PT_GNU_RELRO = 0x6474e552, // Read-only after relocations
+    PT_GNU_PROPERTY = 0x6474e553,
     PT_PAX_FLAGS = 0x65041580,
 };
 
@@ -165,7 +167,7 @@ enum {
     DT_INIT = 12, // d_ptr Address of the initialization function.
     DT_FINI = 13, // d_ptr Address of the termination function.
     DT_SONAME = 14, // d_val The string table offset of the name of this shared object.
-    DT_RPATH = 15, // d_val The string table offset of a shared library search path string.
+    DT_RPATH = 15, // d_val The string table offset of a shared library search path string (deprecated)
     DT_SYMBOLIC = 16, // ignored The presence of this dynamic table entry modifies the
       // symbol resolution algorithm for references within the
       // library. Symbols defined within the library are used to
@@ -189,8 +191,10 @@ enum {
     DT_FINI_ARRAY = 26, // d_ptr Pointer to an array of pointers to termination functions.
     DT_INIT_ARRAYSZ = 27, // d_val Size, in bytes, of the array of initialization functions.
     DT_FINI_ARRAYSZ = 28, // d_val Size, in bytes, of the array of termination functions.
+    DT_RUNPATH = 29, // d_val The string table offset of a shared library search path string.
     DT_FLAGS = 30, // value is various flags, bits from DF_*.
     DT_FLAGS_1 = 0x6ffffffb, // value is various flags, bits from DF_1_*.
+    DT_VERSYM = 0x6ffffff0, // d_ptr Address of the version symbol table.
     DT_LOOS = 0x60000000, // Defines a range of dynamic table tags that are reserved for
       // environment-specific use.
     DT_HIOS = 0x6FFFFFFF, //
@@ -348,6 +352,7 @@ public:
     void run_fini_funcs();
     template <typename T = void>
     T* lookup(const char* name);
+    void* cached_lookup(const std::string& name);
     dladdr_info lookup_addr(const void* addr);
     bool contains_addr(const void* addr);
     ulong module_index() const;
@@ -361,7 +366,13 @@ public:
     void init_static_tls();
     size_t initial_tls_size() { return _initial_tls_size; }
     void* initial_tls() { return _initial_tls.get(); }
+    void* get_tls_segment() { return _tls_segment; }
+    bool is_non_pie_executable() { return _ehdr.e_type == ET_EXEC; }
     std::vector<ptrdiff_t>& initial_tls_offsets() { return _initial_tls_offsets; }
+    bool is_executable() { return _is_executable; }
+    ulong get_tls_size();
+    ulong get_aligned_tls_size();
+    void copy_local_tls(void* to_addr);
 protected:
     virtual void load_segment(const Elf64_Phdr& segment) = 0;
     virtual void unload_segment(const Elf64_Phdr& segment) = 0;
@@ -386,9 +397,9 @@ private:
     void relocate_rela();
     void relocate_pltgot();
     unsigned symtab_len();
-    ulong get_tls_size();
     void collect_dependencies(std::unordered_set<elf::object*>& ds);
     void prepare_initial_tls(void* buffer, size_t size, std::vector<ptrdiff_t>& offsets);
+    void prepare_local_tls(std::vector<ptrdiff_t>& offsets);
     void alloc_static_tls();
     void make_text_writable(bool flag);
 protected:
@@ -399,7 +410,7 @@ protected:
     void* _base;
     void* _end;
     void* _tls_segment;
-    ulong _tls_init_size, _tls_uninit_size;
+    ulong _tls_init_size, _tls_uninit_size, _tls_alignment;
     bool _static_tls;
     ptrdiff_t _static_tls_offset;
     static std::atomic<ptrdiff_t> _static_tls_alloc;
@@ -413,6 +424,8 @@ protected:
     std::unique_ptr<char[]> _section_names_cache;
     bool _is_executable;
     bool is_core();
+
+    std::unordered_map<std::string,void*> _cached_symbols;
 
     // Keep list of references to other modules, to prevent them from being
     // unloaded. When this object is unloaded, the reference count of all
@@ -433,7 +446,7 @@ protected:
                             Elf64_Sxword addend);
     bool arch_relocate_jump_slot(u32 sym, void *addr, Elf64_Sxword addend, bool ignore_missing = false);
     size_t static_tls_end() {
-        if (is_core()) {
+        if (is_core() || is_executable()) {
             return 0;
         }
         return _static_tls_offset + get_tls_size();
@@ -626,6 +639,9 @@ private:
     // by init_library() at arbitrary time later - the delayed initialization scenario
     std::stack<std::vector<std::shared_ptr<object>>> _loaded_objects_stack;
 };
+
+extern void *missing_symbols_page_addr;
+void setup_missing_symbols_detector();
 
 void create_main_program();
 

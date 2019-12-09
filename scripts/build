@@ -4,6 +4,53 @@
 # This first runs "make" with the same parameters, and then builds
 # the requested image.
 
+usage() {
+	cat <<-EOF
+	Build OSv kernel and specified modules/apps and package them together into a runnable image
+
+	This bash shell script acts as a top level orchestration tool intended to build
+	OSv images. It does so by invoking a make against the main OSv makefile to
+	build the kernel and then delegates to various Python scripts (scripts/module.py)
+	to orchestrate building of explicitly specified apps and modules as well as any
+	implicitly dependant ones. The end result is the build/<mode>/usr.img file that
+	is composed of OSv kernel (loader-stripped.elf) and application files and can be
+	executed using ./scripts/run.py.
+
+	Usage:
+	  scripts/build [options] image=<app1>[,<app2[.run_conf]>[,<module1>,..]] modules=<module1>[,..] | check
+	  scripts/build clean
+
+	Options:
+	  --help|-h                     Print this help message
+	  arch=x64|aarch64              Specify the build architecture; default is x64
+	  mode=release|debug            Specify the build mode; default is release
+	  export=none|selected|all      If 'selected' or 'all' export the app files to build/export
+	  fs=zfs|rofs|ramfs             Specify the filesystem of the image partition
+	  fs_size=N                     Specify the size of the image in bytes
+	  fs_size_mb=N                  Specify the size of the image in MiB
+	  app_local_exec_tls_size=N     Specify the size of app local TLS in bytes; the default is 64
+	  usrskel=<*.skel>              Specify the base manifest for the image
+	  <module_makefile_arg>=<value> Pass value of module_makefile_arg to an app/module makefile
+	                                (can be used to customize specific app/module build process)
+	  -j<N>                         Set number of parallel jobs for make
+	  --append-manifest             Append build/<mode>/append.manifest to usr.manifest
+
+	Examples:
+	  ./scripts/build -j4 fs=rofs image=native-example   # Create image with native-example app
+
+	  ./scripts/build JAVA_VERSION=10 image=openjdk-zulu-9-and-above,spring-boot-example
+	                                                     # Create image with spring boot app with Java 10 jdk
+
+	  ./scripts/manifest_from_host.sh -w ls && ./script/build --append-manifest
+	                                                     # Create manifest for 'ls' executable
+
+	  ./script/build check                               # Create test image and run all tests in it
+
+	  ./script/build clean                               # Clean the build tree
+	EOF
+	exit ${1:-0}
+}
+
 trap 'echo "$0 failed: $BASH_COMMAND" >&2; exit $?' ERR
 
 # If "MAKEFLAGS" is set, we've been run from "make". The following hacks
@@ -26,7 +73,9 @@ stage1_args="stage1"
 for i
 do
 	case $i in
-	image=*|modules=*|fs=*|usrskel=*|check) ;;
+	--help|-h)
+		usage ;;
+	image=*|modules=*|fs=*|usrskel=*|check|--append-manifest) ;;
 	clean)
 		stage1_args=clean ;;
 	*)	# yuck... Is there a prettier way to append to array?
@@ -96,11 +145,13 @@ do
 	check)	# "build check" is a shortcut for
 		# "build image=tests; scripts/test.py"
 		vars[image]=tests;;
+	--append-manifest)
+		vars[append_manifest]="true";;
 	esac
 done
 
 # fs_size_mb is in megabytes (1024*1024 bytes)
-fs_size_mb=${vars[fs_size_mb]-10240}
+fs_size_mb=${vars[fs_size_mb]-256}
 # fs_size is in bytes
 fs_size=${vars[fs_size]-$(($fs_size_mb*1024*1024))}
 # size must be a multiple of 512. Round it down
@@ -119,10 +170,10 @@ esac
 modules=${vars[modules]-!$image}
 
 # TODO: some modules need these... Would be better if they wouldn't...
-jdkbase=${vars[jdkbase]-`find $SRC/external/$arch/openjdk.bin/usr/lib/jvm -maxdepth 1 -type d -name 'java*'`}
-gccbase=${vars[gccbase]-$SRC/external/$arch/gcc.bin}
-glibcbase=${vars[glibcbase]-$SRC/external/$arch/glibc.bin}
-miscbase=${vars[miscbase]-$SRC/external/$arch/misc.bin}
+jdkbase=${vars[jdkbase]-`find "$SRC"/external/$arch/openjdk.bin/usr/lib/jvm -maxdepth 1 -type d -name 'java*'`}
+gccbase=${vars[gccbase]-"$SRC"/external/$arch/gcc.bin}
+glibcbase=${vars[glibcbase]-"$SRC"/external/$arch/glibc.bin}
+miscbase=${vars[miscbase]-"$SRC"/external/$arch/misc.bin}
 
 case $OUT in
 /*)	OSV_BUILD_PATH=$OUT;;
@@ -154,7 +205,37 @@ if [ "$export" == "selected" ]
 then
 	no_required_arg="--no-required"
 fi
-fs_type=$fs_type jdkbase=$jdkbase ARCH=$arch mode=$mode OSV_BASE=$SRC OSV_BUILD_PATH=$OSV_BUILD_PATH scripts/module.py $j_arg build -c $modules $usrskel_arg $no_required_arg
+
+if [[ ${vars[append_manifest]} == "true" && $modules == "!default" ]]; then
+	modules="empty"
+fi
+
+# The parentheses start a subshell. Whatever is exported there, doesn't affect the external shell
+(
+	# Note: the double-quotes and almost everything in the line below is important to correctly allow spaces
+	# This specifically allows us to pass extra arguments to the modules/apps makefiles
+	for i in "${args[@]}"
+	do
+		case $i in
+		*=*)
+			# again, the double-quotes is important in case the variable's value contains spaces
+			export "$i" ;;
+		esac
+	done
+	# Export the variables we already have. This makes it unnecessary to do "fs__type=$fstype jdkbase $jdkbase ..."
+	export fs_type jdkbase mode OSV_BUILD_PATH
+	# Other variables we wanted to rename, I don't know why
+	export ARCH=$arch OSV_BASE=$SRC
+	# Run what we wanted to run. It will inherit everything we exported above.
+	scripts/module.py $j_arg build -c "$modules" $usrskel_arg $no_required_arg
+)
+
+if [[ ${vars[append_manifest]} == "true" && -f "$OSV_BUILD_PATH/append.manifest" ]]; then
+	cat "$OSV_BUILD_PATH/append.manifest" >> "$OSV_BUILD_PATH/usr.manifest"
+	if [[ -f "$OSV_BUILD_PATH/append_cmdline" && $(cat "$OSV_BUILD_PATH/cmdline") == "" ]]; then
+		cp $OSV_BUILD_PATH/append_cmdline $OSV_BUILD_PATH/cmdline
+	fi
+fi
 
 bootfs_manifest=$manifest make "${args[@]}" | tee -a build.out
 # check exit status of make
@@ -182,26 +263,26 @@ case $fs_type in
 zfs)
 	cp loader.img bare.raw
 	zfs_size=$(($fs_size - $kernel_end))
-	$SRC/scripts/imgedit.py setpartition "-f raw bare.raw" 2 $kernel_end $zfs_size
+	"$SRC"/scripts/imgedit.py setpartition "-f raw bare.raw" 2 $kernel_end $zfs_size
 
 	qemu-img convert -f raw -O qcow2 bare.raw usr.img
 	qemu-img resize usr.img ${fs_size}b >/dev/null 2>&1
 
 	if [ "$export" == "none" ]
 	then
-		$SRC/scripts/upload_manifest.py -o usr.img -m usr.manifest -D jdkbase=$jdkbase -D gccbase=$gccbase -D glibcbase=$glibcbase -D miscbase=$miscbase
+		"$SRC"/scripts/upload_manifest.py -o usr.img -m usr.manifest -D jdkbase="$jdkbase" -D gccbase="$gccbase" -D glibcbase="$glibcbase" -D miscbase="$miscbase"
 	else
 		export_dir=${vars[export_dir]-$SRC/build/export}
-		$SRC/scripts/export_manifest.py -e "$export_dir" -m usr.manifest -D jdkbase=$jdkbase -D gccbase=$gccbase -D glibcbase=$glibcbase -D miscbase=$miscbase
+		"$SRC"/scripts/export_manifest.py -e "$export_dir" -m usr.manifest -D jdkbase="$jdkbase" -D gccbase="$gccbase" -D glibcbase="$glibcbase" -D miscbase="$miscbase"
 	fi
 	;;
 rofs)
 	rm -rf rofs.img
-	$SRC/scripts/gen-${fs_type}-img.py -o rofs.img -m usr.manifest -D jdkbase=$jdkbase -D gccbase=$gccbase -D glibcbase=$glibcbase -D miscbase=$miscbase
+	"$SRC"/scripts/gen-rofs-img.py -o rofs.img -m usr.manifest -D jdkbase="$jdkbase" -D gccbase="$gccbase" -D glibcbase="$glibcbase" -D miscbase="$miscbase"
 	rofs_size=`stat --printf %s rofs.img`
 	img_size=$((kernel_end + rofs_size))
 	cp loader.img bare.raw
-	$SRC/scripts/imgedit.py setpartition "-f raw bare.raw" 2 $kernel_end $rofs_size
+	"$SRC"/scripts/imgedit.py setpartition "-f raw bare.raw" 2 $kernel_end $rofs_size
 	qemu-img resize bare.raw ${img_size}b >/dev/null 2>&1
 	dd if=rofs.img of=bare.raw obs=${kernel_end} seek=1 >/dev/null 2>&1
 	qemu-img convert -f raw -O qcow2 bare.raw usr.img
@@ -211,14 +292,14 @@ ramfs)
 	;;
 esac
 
-$SRC/scripts/imgedit.py setargs usr.img `cat cmdline`
+"$SRC"/scripts/imgedit.py setargs usr.img `cat cmdline`
 
 # Support "build check"
 for i
 do
 	case $i in
 	check)	set -x
-		cd $SRC
+		cd "$SRC"
 		exec ./scripts/test.py
 	esac
 done

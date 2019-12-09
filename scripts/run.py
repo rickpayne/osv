@@ -12,6 +12,8 @@ stty_params = None
 
 devnull = open('/dev/null', 'w')
 
+osv_base = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
+
 def stty_save():
     global stty_params
     p = subprocess.Popen(["stty", "-g"], stdout=subprocess.PIPE, stderr=devnull)
@@ -30,7 +32,10 @@ def format_args(args):
     def format_arg(arg):
         if ' ' in arg:
             return '"%s"' % arg
-        return arg
+        elif arg[0] == '-':
+            return '\\\n' + arg
+        else:
+            return arg
 
     return ' '.join(map(format_arg, args))
 
@@ -63,8 +68,14 @@ def set_imgargs(options):
     if options.sampler:
         execute = '--sampler=%d %s' % (int(options.sampler), execute)
 
+    if options.hypervisor == 'qemu_microvm':
+        execute = '--nopci ' + execute
+
     options.osv_cmdline = execute
-    cmdline = ["scripts/imgedit.py", "setargs", options.image_file, execute]
+    if options.kernel or options.hypervisor == 'qemu_microvm':
+        return
+
+    cmdline = [os.path.join(osv_base, "scripts/imgedit.py"), "setargs", options.image_file, execute]
     if options.dry_run:
         print(format_args(cmdline))
     else:
@@ -85,8 +96,10 @@ def is_direct_io_supported(path):
 
 def start_osv_qemu(options):
 
-    if options.unsafe_cache or not is_direct_io_supported(options.image_file):
+    if not is_direct_io_supported(options.image_file):
         aio = 'cache=unsafe,aio=threads'
+    elif options.block_device_cache != None:
+        aio = 'cache=%s,aio=threads'% options.block_device_cache
     else:
         aio = 'cache=none,aio=native'
 
@@ -94,7 +107,7 @@ def start_osv_qemu(options):
         "-m", options.memsize,
         "-smp", options.vcpus]
 
-    if not options.novnc:
+    if not options.novnc and options.hypervisor != 'qemu_microvm':
         args += [
         "-vnc", options.vnc]
     else:
@@ -109,7 +122,7 @@ def start_osv_qemu(options):
         args += [
         "-display", "sdl"]
 
-    if options.kernel:
+    if options.kernel or options.hypervisor == 'qemu_microvm':
         boot_index = ""
         args += [
         "-kernel", options.kernel_file,
@@ -117,14 +130,20 @@ def start_osv_qemu(options):
     else:
         boot_index = ",bootindex=0"
 
-    if options.sata:
+    if options.hypervisor == 'qemu_microvm':
+        args += [
+        "-M", "microvm,x-option-roms=off,pit=off,pic=off,rtc=off",
+        "-nodefaults", "-no-user-config", "-no-reboot", "-global", "virtio-mmio.force-legacy=off",
+        "-device", "virtio-blk-device,id=blk0,drive=hd0,scsi=off%s%s" % (boot_index, options.virtio_device_suffix),
+        "-drive", "file=%s,if=none,id=hd0,%s" % (options.image_file, aio)]
+    elif options.sata:
         args += [
         "-machine", "q35",
         "-drive", "file=%s,if=none,id=hd0,media=disk,%s" % (options.image_file, aio),
         "-device", "ide-hd,drive=hd0,id=idehd0,bus=ide.0"]
     elif options.scsi:
         args += [
-        "-device", "virtio-scsi-pci,id=scsi0",
+        "-device", "virtio-scsi-pci,id=scsi0%s" % options.virtio_device_suffix,
         "-drive", "file=%s,if=none,id=hd0,media=disk,%s" % (options.image_file, aio),
         "-device", "scsi-hd,bus=scsi0.0,drive=hd0,scsi-id=1,lun=0%s" % boot_index]
     elif options.ide:
@@ -132,12 +151,12 @@ def start_osv_qemu(options):
         "-hda", options.image_file]
     else:
         args += [
-        "-device", "virtio-blk-pci,id=blk0,drive=hd0,scsi=off%s" % boot_index,
+        "-device", "virtio-blk-pci,id=blk0,drive=hd0,scsi=off%s%s" % (boot_index, options.virtio_device_suffix),
         "-drive", "file=%s,if=none,id=hd0,%s" % (options.image_file, aio)]
 
     if options.cloud_init_image:
         args += [
-        "-device", "virtio-blk-pci,id=blk1,bootindex=1,drive=hd1,scsi=off",
+        "-device", "virtio-blk-pci,id=blk1,bootindex=1,drive=hd1,scsi=off%s" % options.virtio_device_suffix,
         "-drive", "file=%s,if=none,id=hd1" % (options.cloud_init_image)]
 
     if options.no_shutdown:
@@ -149,6 +168,8 @@ def start_osv_qemu(options):
     for idx in range(int(options.nics)):
         if options.vmxnet3:
             net_device_options = ['vmxnet3']
+        elif options.hypervisor == 'qemu_microvm':
+            net_device_options = ['virtio-net-device']
         else:
             net_device_options = ['virtio-net-pci']
 
@@ -157,7 +178,7 @@ def start_osv_qemu(options):
 
         if options.networking:
             if options.vhost:
-                args += ["-netdev", "tap,id=hn%d,script=scripts/qemu-ifup.sh,vhost=on" % idx]
+                args += ["-netdev", "tap,id=hn%d,script=%s,vhost=on" % (idx, os.path.join(osv_base, "scripts/qemu-ifup.sh"))]
             else:
                 for bridge_helper_dir in ['/usr/libexec', '/usr/lib/qemu']:
                     bridge_helper = bridge_helper_dir + '/qemu-bridge-helper'
@@ -180,16 +201,23 @@ def start_osv_qemu(options):
             args += ["-netdev", "user,id=un%d,net=192.168.122.0/24,host=192.168.122.1%s" % (idx, forward_options)]
             net_device_options.append("netdev=un%d" % idx)
 
-        args += ["-device", ','.join(net_device_options)]
+        net_device_options_str = ','.join(net_device_options)
+        if not options.vmxnet3:
+            net_device_options_str = net_device_options_str + options.virtio_device_suffix
 
-    args += ["-device", "virtio-rng-pci"]
+        args += ["-device", net_device_options_str]
 
-    if options.hypervisor == "kvm":
+    if options.hypervisor != 'qemu_microvm':
+        args += ["-device", "virtio-rng-pci%s" % options.virtio_device_suffix]
+
+    if options.hypervisor == "kvm" or options.hypervisor == 'qemu_microvm':
         args += ["-enable-kvm", "-cpu", "host,+x2apic"]
     elif options.hypervisor == "none" or options.hypervisor == "qemu":
         pass
 
-    if options.detach:
+    if options.hypervisor == 'qemu_microvm':
+        args += ["-serial", "stdio"]
+    elif options.detach:
         args += ["-daemonize"]
     else:
         signal_option = ('off', 'on')[options.with_signals]
@@ -394,6 +422,7 @@ def start_osv(options):
             "xenpv" : start_osv_xen,
             "none" : start_osv_qemu,
             "qemu" : start_osv_qemu,
+            "qemu_microvm" : start_osv_qemu,
             "kvm" : start_osv_qemu,
             "vmware" : start_osv_vmware,
     }
@@ -448,15 +477,15 @@ if __name__ == "__main__":
     parser.add_argument("-e", "--execute", action="store", default=None, metavar="CMD",
                         help="edit command line before execution")
     parser.add_argument("-p", "--hypervisor", action="store", default="auto",
-                        help="choose hypervisor to run: kvm, xen, xenpv, vmware, none (plain qemu)")
+                        help="choose hypervisor to run: kvm, qemu_microvm, xen, xenpv, vmware, none (plain qemu)")
     parser.add_argument("-D", "--detach", action="store_true",
                         help="run in background, do not connect the console")
     parser.add_argument("-H", "--no-shutdown", action="store_true",
                         help="don't restart qemu automatically (allow debugger to connect on early errors)")
     parser.add_argument("-s", "--with-signals", action="store_true", default=False,
                         help="qemu only. handle signals instead of passing keys to the guest. pressing ctrl+c from console will kill the emulator")
-    parser.add_argument("-u", "--unsafe-cache", action="store_true",
-                        help="Set cache to unsafe. Use it at your own risk.")
+    parser.add_argument("--block-device-cache", action="store", default=None,
+                        help="Set QEMU block device cache to: none, writethrough, writeback, directsync or unsafe.")
     parser.add_argument("-g", "--graphics", action="store_true",
                         help="Enable graphics mode.")
     parser.add_argument("-V", "--verbose", action="store_true",
@@ -499,11 +528,13 @@ if __name__ == "__main__":
     parser.add_argument("--cloud-init-image", action="store",
                         help="Path to the optional cloud-init image that should be attached to the instance")
     parser.add_argument("-k", "--kernel", action="store_true",
-                        help="Run OSv in QEMU kernel mode as multiboot.")
+                        help="Run OSv in QEMU kernel mode as PVH.")
+    parser.add_argument("--virtio", action="store", choices=["legacy","transitional","modern"], default="transitional",
+                        help="specify virtio version: legacy, transitional or modern")
     cmdargs = parser.parse_args()
     cmdargs.opt_path = "debug" if cmdargs.debug else "release" if cmdargs.release else "last"
-    cmdargs.image_file = os.path.abspath(cmdargs.image or "build/%s/usr.img" % cmdargs.opt_path)
-    cmdargs.kernel_file = "build/%s/loader.bin" % cmdargs.opt_path
+    cmdargs.image_file = os.path.abspath(cmdargs.image or os.path.join(osv_base, "build/%s/usr.img" % cmdargs.opt_path))
+    cmdargs.kernel_file = os.path.join(osv_base, "build/%s/loader-stripped.elf" % cmdargs.opt_path)
     if not os.path.exists(cmdargs.image_file):
         raise Exception('Image file %s does not exist.' % cmdargs.image_file)
     if cmdargs.cloud_init_image:
@@ -513,5 +544,13 @@ if __name__ == "__main__":
 
     if cmdargs.hypervisor == "auto":
         cmdargs.hypervisor = choose_hypervisor(cmdargs.networking)
+
+    if cmdargs.virtio == "legacy":
+        cmdargs.virtio_device_suffix = ",disable-legacy=off,disable-modern=on"
+    elif cmdargs.virtio == "modern":
+        cmdargs.virtio_device_suffix = ",disable-legacy=on,disable-modern=off"
+    else:
+        cmdargs.virtio_device_suffix = ""
+
     # Call main
     main(cmdargs)

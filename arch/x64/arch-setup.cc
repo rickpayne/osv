@@ -22,50 +22,13 @@
 #include <osv/commands.hh>
 #include "dmi.hh"
 
-struct multiboot_info_type {
-    u32 flags;
-    u32 mem_lower;
-    u32 mem_upper;
-    u32 boot_device;
-    u32 cmdline;
-    u32 mods_count;
-    u32 mods_addr;
-    u32 syms[4];
-    u32 mmap_length;
-    u32 mmap_addr;
-    u32 drives_length;
-    u32 drives_addr;
-    u32 config_table;
-    u32 boot_loader_name;
-    u32 apm_table;
-    u32 vbe_control_info;
-    u32 vbe_mode_info;
-    u16 vbe_mode;
-    u16 vbe_interface_seg;
-    u16 vbe_interface_off;
-    u16 vbe_interface_len;
-} __attribute__((packed));
-
-struct osv_multiboot_info_type {
-    struct multiboot_info_type mb;
-    u32 tsc_init, tsc_init_hi;
-    u32 tsc_disk_done, tsc_disk_done_hi;
-    u32 tsc_uncompress_done, tsc_uncompress_done_hi;
-    u8 disk_err;
-} __attribute__((packed));
-
-struct e820ent {
-    u32 ent_size;
-    u64 addr;
-    u64 size;
-    u32 type;
-} __attribute__((packed));
-
 osv_multiboot_info_type* osv_multiboot_info;
 
+#include "drivers/virtio-mmio.hh"
 void parse_cmdline(multiboot_info_type& mb)
 {
     auto p = reinterpret_cast<char*>(mb.cmdline);
+    virtio::parse_mmio_device_configuration(p);
     osv::parse_cmdline(p);
 }
 
@@ -117,10 +80,24 @@ extern size_t elf_size;
 extern void* elf_start;
 extern boot_time_chart boot_time;
 
+// Because vmlinux_entry64 replaces start32 as a new entry of loader.elf we need a way
+// to place address of start32 so that boot16 know where to jump to. We achieve
+// it by placing address of start32 at the known offset at memory
+// as defined by section .start32_address in loader.ld
+extern "C" void start32();
+void * __attribute__((section (".start32_address"))) start32_address =
+  reinterpret_cast<void*>((long)&start32 - OSV_KERNEL_VM_SHIFT);
+
+extern "C" void start32_from_vmlinuz();
+void * __attribute__((section (".start32_from_vmlinuz_address"))) start32_from_vmlinuz_address =
+  reinterpret_cast<void*>((long)&start32_from_vmlinuz - OSV_KERNEL_VM_SHIFT);
+
 void arch_setup_free_memory()
 {
-    static ulong edata;
+    static ulong edata, edata_phys;
     asm ("movl $.edata, %0" : "=rm"(edata));
+    edata_phys = edata - OSV_KERNEL_VM_SHIFT;
+
     // copy to stack so we don't free it now
     auto omb = *osv_multiboot_info;
     auto mb = omb.mb;
@@ -159,13 +136,13 @@ void arch_setup_free_memory()
     // page tables have been set up, so we can't reference the memory being
     // freed.
     for_each_e820_entry(e820_buffer, e820_size, [] (e820ent ent) {
-        // can't free anything below edata, it's core code.
-        // FIXME: can free below 2MB.
-        if (ent.addr + ent.size <= edata) {
+        // can't free anything below edata_phys, it's core code.
+        // can't free anything below kernel at this moment
+        if (ent.addr + ent.size <= edata_phys) {
             return;
         }
-        if (intersects(ent, edata)) {
-            ent = truncate_below(ent, edata);
+        if (intersects(ent, edata_phys)) {
+            ent = truncate_below(ent, edata_phys);
         }
         // ignore anything above 1GB, we haven't mapped it yet
         if (intersects(ent, initial_map)) {
@@ -179,16 +156,36 @@ void arch_setup_free_memory()
         auto base = reinterpret_cast<void*>(get_mem_area_base(area));
         mmu::linear_map(base, 0, initial_map, initial_map);
     }
-    // map the core, loaded 1:1 by the boot loader
-    mmu::phys elf_phys = reinterpret_cast<mmu::phys>(elf_header);
-    elf_start = reinterpret_cast<void*>(elf_header);
-    elf_size = edata - elf_phys;
-    mmu::linear_map(elf_start, elf_phys, elf_size, OSV_KERNEL_BASE);
+    // Map the core, loaded by the boot loader
+    // In order to properly setup mapping between virtual
+    // and physical we need to take into account where kernel
+    // is loaded in physical memory - elf_phys_start - and
+    // where it is linked to start in virtual memory - elf_start
+    static mmu::phys elf_phys_start = reinterpret_cast<mmu::phys>(elf_header);
+    // There is simple invariant between elf_phys_start and elf_start
+    // as expressed by the assignment below
+    elf_start = reinterpret_cast<void*>(elf_phys_start + OSV_KERNEL_VM_SHIFT);
+    elf_size = edata_phys - elf_phys_start;
+    mmu::linear_map(elf_start, elf_phys_start, elf_size, OSV_KERNEL_BASE);
     // get rid of the command line, before low memory is unmapped
     parse_cmdline(mb);
     // now that we have some free memory, we can start mapping the rest
     mmu::switch_to_runtime_page_tables();
     for_each_e820_entry(e820_buffer, e820_size, [] (e820ent ent) {
+        //
+        // Free the memory below elf_phys_start which we could not before
+        if (ent.addr < (u64)elf_phys_start) {
+            auto ent_below_kernel = ent;
+            if (ent.addr + ent.size >= (u64)elf_phys_start) {
+                ent_below_kernel = truncate_above(ent, (u64) elf_phys_start);
+            }
+            mmu::free_initial_memory_range(ent_below_kernel.addr, ent_below_kernel.size);
+            // If there is nothing left below elf_phys_start return
+            if (ent.addr + ent.size <= (u64)elf_phys_start) {
+               return;
+            }
+        }
+        //
         // Ignore memory already freed above
         if (ent.addr + ent.size <= initial_map) {
             return;
@@ -197,7 +194,7 @@ void arch_setup_free_memory()
             ent = truncate_below(ent, initial_map);
         }
         for (auto&& area : mmu::identity_mapped_areas) {
-        auto base = reinterpret_cast<void*>(get_mem_area_base(area));
+            auto base = reinterpret_cast<void*>(get_mem_area_base(area));
             mmu::linear_map(base + ent.addr, ent.addr, ent.size, ~0);
         }
         mmu::free_initial_memory_range(ent.addr, ent.size);
@@ -258,7 +255,6 @@ void arch_init_premain()
 #include "drivers/virtio-blk.hh"
 #include "drivers/virtio-scsi.hh"
 #include "drivers/virtio-net.hh"
-#include "drivers/virtio-assign.hh"
 #include "drivers/virtio-rng.hh"
 #include "drivers/xenplatform-pci.hh"
 #include "drivers/ahci.hh"
@@ -266,27 +262,27 @@ void arch_init_premain()
 #include "drivers/vmxnet3.hh"
 #include "drivers/ide.hh"
 
-extern bool opt_assign_net;
-
+extern bool opt_pci_disabled;
 void arch_init_drivers()
 {
     // initialize panic drivers
     panic::pvpanic::probe_and_setup();
     boot_time.event("pvpanic done");
 
-    // Enumerate PCI devices
-    pci::pci_device_enumeration();
-    boot_time.event("pci enumerated");
+    if (!opt_pci_disabled) {
+        // Enumerate PCI devices
+        pci::pci_device_enumeration();
+        boot_time.event("pci enumerated");
+    }
+
+    // Register any parsed virtio-mmio devices
+    virtio::register_mmio_devices(device_manager::instance());
 
     // Initialize all drivers
     hw::driver_manager* drvman = hw::driver_manager::instance();
     drvman->register_driver(virtio::blk::probe);
     drvman->register_driver(virtio::scsi::probe);
-    if (opt_assign_net) {
-        drvman->register_driver(virtio::assigned::probe_net);
-    } else {
-        drvman->register_driver(virtio::net::probe);
-    }
+    drvman->register_driver(virtio::net::probe);
     drvman->register_driver(virtio::rng::probe);
     drvman->register_driver(xenfront::xenplatform_pci::probe);
     drvman->register_driver(ahci::hba::probe);
@@ -323,4 +319,20 @@ bool arch_setup_console(std::string opt_console)
         return false;
     }
     return true;
+}
+
+void reset_bootchart(osv_multiboot_info_type* mb_info)
+{
+    auto now = processor::ticks();
+    u32 now_high = (u32)(now >> 32);
+    u32 now_low = (u32)now;
+
+    mb_info->tsc_init_hi = now_high;
+    mb_info->tsc_init = now_low;
+
+    mb_info->tsc_disk_done_hi = now_high;
+    mb_info->tsc_disk_done = now_low;
+
+    mb_info->tsc_uncompress_done_hi = now_high;
+    mb_info->tsc_uncompress_done = now_low;
 }

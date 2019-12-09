@@ -26,6 +26,7 @@
 #include <osv/stubbing.hh>
 #include <sys/utsname.h>
 #include <osv/demangle.hh>
+#include <boost/version.hpp>
 
 #include "arch.hh"
 
@@ -33,6 +34,9 @@ TRACEPOINT(trace_elf_load, "%s", const char *);
 TRACEPOINT(trace_elf_unload, "%s", const char *);
 TRACEPOINT(trace_elf_lookup, "%s", const char *);
 TRACEPOINT(trace_elf_lookup_addr, "%p", const void *);
+
+extern void* elf_start;
+extern size_t elf_size;
 
 using namespace boost::range;
 
@@ -147,6 +151,19 @@ void* object::lookup(const char* symbol)
     return sm.relocated_addr();
 }
 
+void* object::cached_lookup(const std::string& name)
+{
+    auto cached_address_it = _cached_symbols.find(name);
+    if (cached_address_it != _cached_symbols.end()) {
+        return cached_address_it->second;
+    }
+    else {
+        void *symbol_address = lookup(name.c_str());
+        _cached_symbols[name] = symbol_address;
+        return symbol_address;
+    }
+}
+
 std::vector<Elf64_Shdr> object::sections()
 {
     size_t bytes = size_t(_ehdr.e_shentsize) * _ehdr.e_shnum;
@@ -211,7 +228,6 @@ memory_image::memory_image(program& prog, void* base)
     auto p = static_cast<Elf64_Phdr*>(base + _ehdr.e_phoff);
     assert(_ehdr.e_phentsize == sizeof(*p));
     _phdrs.assign(p, p + _ehdr.e_phnum);
-    set_base(base);
 }
 
 void memory_image::load_segment(const Elf64_Phdr& phdr)
@@ -254,14 +270,9 @@ void file::load_elf_header()
           || _ehdr.e_ident[EI_OSABI] == 0)) {
         throw osv::invalid_elf_error("bad os abi");
     }
-    // We currently only support running ET_DYN objects (shared library or
-    // position-independent executable). In the future we can add support for
-    // ET_EXEC (ordinary, position-dependent executables) but it will require
-    // loading them at their specified address and moving the kernel out of
-    // their way.
-    if (_ehdr.e_type != ET_DYN) {
+    if (!(_ehdr.e_type == ET_DYN || _ehdr.e_type == ET_EXEC)) {
         throw osv::invalid_elf_error(
-                "bad executable type (only shared-object or PIE supported)");
+                "bad executable type (only shared-object, PIE or non-PIE executable supported)");
     }
 }
 
@@ -284,17 +295,37 @@ void* align(void* addr, ulong align, ulong offset)
 
 }
 
+static bool intersects_with_kernel(Elf64_Addr elf_addr)
+{
+    void *addr = reinterpret_cast<void*>(elf_addr);
+    return addr >= elf_start && addr < elf_start + elf_size;
+}
+
 void object::set_base(void* base)
 {
     auto p = std::min_element(_phdrs.begin(), _phdrs.end(),
                               [](Elf64_Phdr a, Elf64_Phdr b)
                                   { return a.p_type == PT_LOAD
                                         && a.p_vaddr < b.p_vaddr; });
-    _base = align(base, p->p_align, p->p_vaddr & (p->p_align - 1)) - p->p_vaddr;
     auto q = std::min_element(_phdrs.begin(), _phdrs.end(),
                               [](Elf64_Phdr a, Elf64_Phdr b)
                                   { return a.p_type == PT_LOAD
                                         && a.p_vaddr > b.p_vaddr; });
+
+    if (!is_core() && is_non_pie_executable()) {
+        // Verify non-PIE executable does not collide with the kernel
+        if (intersects_with_kernel(p->p_vaddr) || intersects_with_kernel(q->p_vaddr + q->p_memsz)) {
+            abort("Non-PIE executable [%s] collides with kernel: [%p-%p] !\n",
+                    pathname().c_str(), p->p_vaddr, q->p_vaddr + q->p_memsz);
+        }
+        // Override the passed in value as the base for non-PIEs (Position Dependant Executables)
+        // needs to be set to 0 because all the addresses in it are absolute
+        _base = 0x0;
+    } else {
+        // Otherwise for kernel, PIEs and shared libraries set the base as requested by caller
+        _base = align(base, p->p_align, p->p_vaddr & (p->p_align - 1)) - p->p_vaddr;
+    }
+
     _end = _base + q->p_vaddr + q->p_memsz;
 }
 
@@ -373,6 +404,7 @@ Elf64_Note::Elf64_Note(void *_base, char *str)
     }
 }
 
+extern "C" char _pie_static_tls_start, _pie_static_tls_end;
 void object::load_segments()
 {
     for (unsigned i = 0; i < _ehdr.e_phnum; ++i) {
@@ -423,23 +455,37 @@ void object::load_segments()
         case PT_GNU_RELRO:
         case PT_GNU_EH_FRAME:
         case PT_PAX_FLAGS:
+        case PT_GNU_PROPERTY:
             break;
         case PT_TLS:
             _tls_segment = _base + phdr.p_vaddr;
             _tls_init_size = phdr.p_filesz;
             _tls_uninit_size = phdr.p_memsz - phdr.p_filesz;
+            _tls_alignment = phdr.p_align;
             break;
         default:
-            abort();
-            throw osv::invalid_elf_error("bad p_type");
+            abort("Unknown p_type in executable %s: %d\n", pathname(), phdr.p_type);
         }
     }
-    // As explained in issue #352, we currently don't correctly support TLS
-    // used in PIEs.
+    if (!is_core() && _ehdr.e_type == ET_EXEC && !_is_executable) {
+        abort("Statically linked executables are not supported!\n");
+    }
     if (_is_executable && _tls_segment) {
-        std::cout << "WARNING: " << pathname() << " is a PIE using TLS. This "
-                  << "is currently unsupported (see issue #352). Link with "
-                  << "'-shared' instead of '-pie'.\n";
+        auto app_tls_size = get_aligned_tls_size();
+        ulong pie_static_tls_maximum_size = &_pie_static_tls_end - &_pie_static_tls_start;
+        if (app_tls_size > pie_static_tls_maximum_size) {
+            // The reservation at the end of the kernel TLS is NOT big enough
+            // to hold the app static TLS. Let us calculate what the reservation should be
+            // and inform user how to relink kernel
+            auto kernel_tls_size = sched::kernel_tls_size();
+            auto kernel_tls_used_size = kernel_tls_size - pie_static_tls_maximum_size;
+            auto kernel_tls_needed_size = align_up(kernel_tls_used_size + app_tls_size, 64UL);
+            auto app_tls_needed_size = kernel_tls_needed_size - kernel_tls_used_size;
+            std::cout << "WARNING: " << pathname() << " is a PIE using TLS of size " << app_tls_size
+                  << " which is greater than the " << pie_static_tls_maximum_size << " bytes limit. "
+                  << "Either re-link the kernel by adding 'app_local_exec_tls_size=" << app_tls_needed_size
+                  << "' to ./scripts/build or re-link the app with '-shared' instead of '-pie'.\n";
+        }
     }
 }
 
@@ -591,7 +637,7 @@ symbol_module object::symbol(unsigned idx, bool ignore_missing)
     }
     if (!ret.symbol) {
         if (ignore_missing) {
-            debug("%s: failed looking up symbol %s\n", pathname().c_str(), demangle(name).c_str());
+            debug("%s: ignoring missing symbol %s\n", pathname().c_str(), demangle(name).c_str());
         } else {
             abort("%s: failed looking up symbol %s\n", pathname().c_str(), demangle(name).c_str());
         }
@@ -756,6 +802,8 @@ elf64_hash(const char *name)
     return h;
 }
 
+constexpr Elf64_Versym old_version_symbol_mask = Elf64_Versym(1) << 15;
+
 Elf64_Sym* object::lookup_symbol_old(const char* name)
 {
     auto symtab = dynamic_ptr<Elf64_Sym>(DT_SYMTAB);
@@ -809,8 +857,12 @@ Elf64_Sym* object::lookup_symbol_gnu(const char* name)
     if (idx == 0) {
         return nullptr;
     }
+    auto version_symtab = dynamic_exists(DT_VERSYM) ? dynamic_ptr<Elf64_Versym>(DT_VERSYM) : nullptr;
     do {
         if ((chains[idx] & ~1) != (hashval & ~1)) {
+            continue;
+        }
+        if (version_symtab && version_symtab[idx] & old_version_symbol_mask) { //Ignore old version symbols
             continue;
         }
         if (strcmp(&strtab[symtab[idx].st_name], name) == 0) {
@@ -919,8 +971,17 @@ static std::string dirname(std::string path)
 void object::load_needed(std::vector<std::shared_ptr<object>>& loaded_objects)
 {
     std::vector<std::string> rpath;
-    if (dynamic_exists(DT_RPATH)) {
-        std::string rpath_str = dynamic_str(DT_RPATH);
+
+    std::string rpath_str;
+    // Prefer newer DT_RUNPATH
+    if (dynamic_exists(DT_RUNPATH)) {
+        rpath_str = dynamic_str(DT_RUNPATH);
+    // Otherwise fall back to older DT_RPATH
+    } else if (dynamic_exists(DT_RPATH)) {
+        rpath_str = dynamic_str(DT_RPATH);
+    }
+
+    if (!rpath_str.empty()) {
         boost::replace_all(rpath_str, "$ORIGIN", dirname(_pathname));
         boost::split(rpath, rpath_str, boost::is_any_of(":"));
     }
@@ -946,6 +1007,11 @@ void object::unload_needed()
 ulong object::get_tls_size()
 {
     return _tls_init_size + _tls_uninit_size;
+}
+
+ulong object::get_aligned_tls_size()
+{
+    return align_up(_tls_init_size + _tls_uninit_size, _tls_alignment);
 }
 
 void object::collect_dependencies(std::unordered_set<elf::object*>& ds)
@@ -1047,9 +1113,9 @@ void object::init_static_tls()
         }
         static_tls |= obj->_static_tls;
         _initial_tls_size = std::max(_initial_tls_size, obj->static_tls_end());
-	// Align initial_tls_size to 64 bytes, to not break the 64-byte
-	// alignment of the TLS segment defined in loader.ld.
-	_initial_tls_size = align_up(_initial_tls_size, (size_t)64);
+        // Align initial_tls_size to 64 bytes, to not break the 64-byte
+        // alignment of the TLS segment defined in loader.ld.
+        _initial_tls_size = align_up(_initial_tls_size, (size_t)64);
     }
     if (!static_tls) {
         _initial_tls_size = 0;
@@ -1061,9 +1127,28 @@ void object::init_static_tls()
         if (obj->is_core()) {
             continue;
         }
-        obj->prepare_initial_tls(_initial_tls.get(), _initial_tls_size,
-                                 _initial_tls_offsets);
+        if (obj->is_executable()) {
+            obj->prepare_local_tls(_initial_tls_offsets);
+        }
+        else {
+            obj->prepare_initial_tls(_initial_tls.get(), _initial_tls_size,
+                                     _initial_tls_offsets);
+        }
     }
+}
+
+// This allocates single page of memory and sets its permissions so
+// that any read, write or execution attempt would trigger a page fault
+// to indicate to user that application tried to access missing symbol
+// ignored by relocate_rela().
+// TODO: In future this page can store the name addresses for each missing symbol
+// and allow informing user which particular symbol was missing
+void *missing_symbols_page_addr;
+void setup_missing_symbols_detector()
+{
+    missing_symbols_page_addr = mmu::map_anon(nullptr, mmu::page_size, mmu::mmap_populate, mmu::perm_rw);
+    assert(missing_symbols_page_addr);
+    mmu::mprotect(missing_symbols_page_addr, mmu::page_size, 0);
 }
 
 program* s_program;
@@ -1077,7 +1162,9 @@ void create_main_program()
 program::program(void* addr)
     : _next_alloc(addr)
 {
-    _core = std::make_shared<memory_image>(*this, (void*)ELF_IMAGE_START);
+    void *program_base = (void*)(ELF_IMAGE_START + OSV_KERNEL_VM_SHIFT);
+    _core = std::make_shared<memory_image>(*this, program_base);
+    _core->set_base(program_base);
     assert(_core->module_index() == core_module_index);
     _core->load_segments();
     set_search_path({"/", "/usr/lib"});
@@ -1089,13 +1176,19 @@ program::program(void* addr)
           "libm.so.6",
 #ifdef __x86_64__
           "ld-linux-x86-64.so.2",
+          // As noted in issue #1040 Boost version 1.69.0 and above is
+          // compiled with hidden visibility, so even if the kernel uses
+          // this library, it will not be visible for the application and
+          // it will need to load its own version of this library.
+#if BOOST_VERSION < 106900
           "libboost_system.so.1.55.0",
-          "libboost_program_options.so.1.55.0",
+#endif
 #endif /* __x86_64__ */
 #ifdef __aarch64__
           "ld-linux-aarch64.so.1",
+#if BOOST_VERSION < 106900
           "libboost_system-mt.so.1.55.0",
-          "libboost_program_options-mt.so.1.55.0",
+#endif
 #endif /* __aarch64__ */
           "libpthread.so.0",
           "libdl.so.2",
@@ -1201,7 +1294,8 @@ program::load_object(std::string name, std::vector<std::string> extra_path,
         _modules_rcu.assign(new_modules.release());
         osv::rcu_dispose(old_modules);
         ef->load_segments();
-        _next_alloc = ef->end();
+        if (!ef->is_non_pie_executable())
+           _next_alloc = ef->end();
         add_debugger_obj(ef.get());
         loaded_objects.push_back(ef);
         ef->load_needed(loaded_objects);

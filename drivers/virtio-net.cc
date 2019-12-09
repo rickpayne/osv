@@ -10,7 +10,6 @@
 
 #include "drivers/virtio.hh"
 #include "drivers/virtio-net.hh"
-#include "drivers/pci-device.hh"
 #include <osv/interrupt.hh>
 
 #include <osv/mempool.hh>
@@ -217,7 +216,7 @@ void net::fill_qstats(const struct txq& txq, struct if_data* out_data) const
 
 bool net::ack_irq()
 {
-    auto isr = virtio_conf_readb(VIRTIO_PCI_ISR);
+    auto isr = _dev.read_and_ack_isr();
 
     if (isr) {
         _rxq.vqueue->disable_interrupts();
@@ -225,26 +224,39 @@ bool net::ack_irq()
     } else {
         return false;
     }
-
 }
 
-net::net(pci::device& dev)
-    : virtio_driver(dev),
-      _rxq(get_virt_queue(0), [this] { this->receiver(); }),
-      _txq(this, get_virt_queue(1))
+void net::init()
 {
-    sched::thread* poll_task = _rxq.poll_task.get();
+    // Steps 4, 5 & 6 - negotiate and confirm features
+    setup_features();
+    read_config();
 
-    poll_task->set_priority(sched::thread::priority_infinity);
+    // Step 7 - generic init of virtqueues
+    probe_virt_queues();
+}
 
+net::net(virtio_device& dev)
+    : virtio_driver(dev),
+    _pre_init(this),
+    _rxq(get_virt_queue(0), [this] { this->receiver(); }),
+    _txq(this, get_virt_queue(1))
+{
     _driver_name = "virtio-net";
     virtio_i("VIRTIO NET INSTANCE");
     _id = _instance++;
 
-    setup_features();
-    read_config();
+    sched::thread* poll_task = _rxq.poll_task.get();
 
-    _hdr_size = _mergeable_bufs ? sizeof(net_hdr_mrg_rxbuf) : sizeof(net_hdr);
+    poll_task->set_priority(sched::thread::priority_infinity);
+
+    // Please look at the section 5.1.6.1 of virtio specification for explanation
+    if (_dev.is_modern()) {
+        _hdr_size = sizeof(net_hdr_mrg_rxbuf);
+    }
+    else {
+        _hdr_size = _mergeable_bufs ? sizeof(net_hdr_mrg_rxbuf) : sizeof(net_hdr);
+    }
 
     //initialize the BSD interface _if
     _ifn = if_alloc(IFT_ETHER);
@@ -290,19 +302,34 @@ net::net(pci::device& dev)
 
     ether_ifattach(_ifn, _config.mac);
 
-    if (dev.is_msix()) {
-        _msi.easy_register({
-            { 0, [&] { _rxq.vqueue->disable_interrupts(); }, poll_task },
-            { 1, [&] { _txq.vqueue->disable_interrupts(); }, nullptr }
-        });
-    } else {
-        _irq.reset(new pci_interrupt(dev,
-                                     [=] { return this->ack_irq(); },
-                                     [=] { poll_task->wake(); }));
-    }
+    interrupt_factory int_factory;
+    int_factory.register_msi_bindings = [this,poll_task](interrupt_manager &msi) {
+       msi.easy_register({
+           { 0, [&] { this->_rxq.vqueue->disable_interrupts(); }, poll_task },
+           { 1, [&] { this->_txq.vqueue->disable_interrupts(); }, nullptr }
+       });
+    };
+
+    int_factory.create_pci_interrupt = [this,poll_task](pci::device &pci_dev) {
+        return new pci_interrupt(
+            pci_dev,
+            [=] { return this->ack_irq(); },
+            [=] { poll_task->wake(); });
+    };
+
+#ifndef AARCH64_PORT_STUB
+    int_factory.create_gsi_edge_interrupt = [this,poll_task]() {
+        return new gsi_edge_interrupt(
+            _dev.get_irq(),
+            [=] { if (this->ack_irq()) poll_task->wake(); });
+    };
+#endif
+
+    _dev.register_interrupt(int_factory);
 
     fill_rx_ring();
 
+    // Step 8
     add_dev_status(VIRTIO_CONFIG_S_DRIVER_OK);
 }
 
@@ -323,8 +350,7 @@ net::~net()
 
 void net::read_config()
 {
-    //read all of the net config  in one shot
-    virtio_conf_read(virtio_pci_config_offset(), &_config, sizeof(_config));
+    virtio_conf_read(0, &(_config.mac[0]), sizeof(_config.mac));
 
     if (get_guest_feature_bit(VIRTIO_NET_F_MAC))
         net_i("The mac addr of the device is %x:%x:%x:%x:%x:%x",
@@ -348,7 +374,16 @@ void net::read_config()
     net_i("Features: %s=%d,%s=%d", "Status", _status, "TSO_ECN", _tso_ecn);
     net_i("Features: %s=%d,%s=%d", "Host TSO ECN", _host_tso_ecn, "CSUM", _csum);
     net_i("Features: %s=%d,%s=%d", "Guest_csum", _guest_csum, "guest tso4", _guest_tso4);
-    net_i("Features: %s=%d", "host tso4", _host_tso4);
+    net_i("Features: %s=%d,%s=%d", "host tso4", _host_tso4, "MRG_RX_BUF", _mergeable_bufs);
+
+    // If VIRTIO_NET_F_MRG_RXBUF is not negotiated and VIRTIO_NET_F_GUEST_TSO4
+    // or VIRTIO_NET_F_GUEST_UFO are, the VirtIO spec mandates the guest to use
+    // large receive buffers
+    // For details please see "5.1.6.3.1 Driver Requirements: Setting Up Receive Buffers" in VirtIO spec
+    if (!_mergeable_bufs && (_guest_tso4 || _guest_ufo)) {
+        net_i("Set up to use large receive buffers");
+        _use_large_buffers = true;
+    }
 }
 
 /**
@@ -437,7 +472,7 @@ void net::receiver()
         // truncating it.
         net_hdr_mrg_rxbuf* mhdr;
 
-        while (void* page = vq->get_buf_elem(&len)) {
+        while (void* buffer = vq->get_buf_elem(&len)) {
 
             vq->get_buf_finalize();
 
@@ -447,12 +482,11 @@ void net::receiver()
             // Bad packet/buffer - discard and continue to the next one
             if (len < _hdr_size + ETHER_HDR_LEN) {
                 rx_drops++;
-                memory::free_page(page);
-
+                free_buffer(buffer);
                 continue;
             }
 
-            mhdr = static_cast<net_hdr_mrg_rxbuf*>(page);
+            mhdr = static_cast<net_hdr_mrg_rxbuf*>(buffer);
 
             if (!_mergeable_bufs) {
                 nbufs = 1;
@@ -460,19 +494,19 @@ void net::receiver()
                 nbufs = mhdr->num_buffers;
             }
 
-            packet.push_back({page + _hdr_size, len - _hdr_size});
+            packet.push_back({buffer + _hdr_size, len - _hdr_size});
 
-            // Read the fragments
+            // Read the fragments - only applies if _mergeable_bufs is ON
             while (--nbufs > 0) {
-                page = vq->get_buf_elem(&len);
-                if (!page) {
+                buffer = vq->get_buf_elem(&len);
+                if (!buffer) {
                     rx_drops++;
                     for (auto&& v : packet) {
                         free_buffer(v);
                     }
                     break;
                 }
-                packet.push_back({page, len});
+                packet.push_back({buffer, len});
                 vq->get_buf_finalize();
             }
 
@@ -520,7 +554,8 @@ mbuf* net::packet_to_mbuf(const std::vector<iovec>& packet)
     auto refcnt = new unsigned;
     m->M_dat.MH.MH_dat.MH_ext.ref_cnt = refcnt;
     m_extadd(m, static_cast<char*>(packet[0].iov_base), packet[0].iov_len,
-            &net::free_buffer_and_refcnt, packet[0].iov_base, refcnt, M_PKTHDR, EXT_EXTREF);
+            _use_large_buffers ? &net::free_large_buffer_and_refcnt : &net::free_buffer_and_refcnt,
+            packet[0].iov_base, refcnt, M_PKTHDR, EXT_EXTREF);
     m->M_dat.MH.MH_pkthdr.len = packet[0].iov_len;
     m->M_dat.MH.MH_pkthdr.rcvif = _ifn;
     m->M_dat.MH.MH_pkthdr.csum_flags = 0;
@@ -535,7 +570,8 @@ mbuf* net::packet_to_mbuf(const std::vector<iovec>& packet)
         refcnt = new unsigned;
         m->M_dat.MH.MH_dat.MH_ext.ref_cnt = refcnt;
         m_extadd(m, static_cast<char*>(iov.iov_base), iov.iov_len,
-                &net::free_buffer_and_refcnt, iov.iov_base, refcnt, 0, EXT_EXTREF);
+                _use_large_buffers ? &net::free_large_buffer_and_refcnt : &net::free_buffer_and_refcnt,
+                iov.iov_base, refcnt, 0, EXT_EXTREF);
         m->m_hdr.mh_len = iov.iov_len;
         m->m_hdr.mh_next = nullptr;
         m_tail->m_hdr.mh_next = m;
@@ -552,10 +588,22 @@ void net::free_buffer_and_refcnt(void* buffer, void* refcnt)
     delete static_cast<unsigned*>(refcnt);
 }
 
+void net::free_large_buffer_and_refcnt(void* buffer, void* refcnt)
+{
+    do_free_large_buffer(buffer);
+    delete static_cast<unsigned*>(refcnt);
+}
+
 void net::do_free_buffer(void* buffer)
 {
     buffer = align_down(buffer, page_size);
     memory::free_page(buffer);
+}
+
+void net::do_free_large_buffer(void* buffer)
+{
+    buffer = align_down(buffer, page_size);
+    memory::free_phys_contiguous_aligned(buffer);
 }
 
 void net::fill_rx_ring()
@@ -564,13 +612,19 @@ void net::fill_rx_ring()
     int added = 0;
     vring* vq = _rxq.vqueue;
 
+    int size_in_pages = _use_large_buffers ? LARGE_BUFFER_SIZE_IN_PAGES : 1;
     while (vq->avail_ring_not_empty()) {
-        auto page = memory::alloc_page();
+        void *buffer;
+        if (_use_large_buffers) {
+            buffer = memory::alloc_phys_contiguous_aligned(size_in_pages * memory::page_size, memory::page_size);
+        } else {
+            buffer = memory::alloc_page();
+        }
 
         vq->init_sg();
-        vq->add_in_sg(page, memory::page_size);
-        if (!vq->add_buf(page)) {
-            memory::free_page(page);
+        vq->add_in_sg(buffer, size_in_pages * memory::page_size);
+        if (!vq->add_buf(buffer)) {
+            free_buffer(buffer);
             break;
         }
         added++;
@@ -856,12 +910,12 @@ u32 net::get_driver_features()
 
 hw_driver* net::probe(hw_device* dev)
 {
-    if (auto pci_dev = dynamic_cast<pci::device*>(dev)) {
-        if (pci_dev->get_id() == hw_device_id(VIRTIO_VENDOR_ID, VIRTIO_NET_DEVICE_ID)) {
+    if (auto virtio_dev = dynamic_cast<virtio_device*>(dev)) {
+        if (virtio_dev->get_id() == hw_device_id(VIRTIO_VENDOR_ID, VIRTIO_ID_NET)) {
             if (opt_maxnic && maxnic-- <= 0) {
                 return nullptr;
             } else {
-                return aligned_new<net>(*pci_dev);
+                return aligned_new<net>(*virtio_dev);
             }
         }
     }

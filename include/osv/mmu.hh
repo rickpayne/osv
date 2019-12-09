@@ -93,10 +93,14 @@ public:
     virtual void fault(uintptr_t addr, exception_frame *ef) override;
     fileref file() const { return _file; }
     f_offset offset() const { return _offset; }
+    u64 file_inode() const { return _file_inode; }
+    dev_t file_dev_id() const { return _file_dev_id; }
 private:
     f_offset offset(uintptr_t addr);
     fileref _file;
     f_offset _offset;
+    u64 _file_inode;
+    dev_t _file_dev_id;
 };
 
 ulong map_jvm(unsigned char* addr, size_t size, size_t align, balloon_ptr b);
@@ -177,6 +181,7 @@ inline bool pte_is_cow(pt_element<0> pte)
 static TRACEPOINT(trace_clear_pte, "ptep=%p, cow=%d, pte=%x", void*, bool, uint64_t);
 
 template<int N>
+__attribute__((always_inline)) // Necessary because of issue #1029
 inline pt_element<N> clear_pte(hw_ptep<N> ptep)
 {
     auto old = ptep.exchange(make_empty_pte<N>());

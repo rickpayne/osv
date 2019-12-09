@@ -23,13 +23,14 @@
 
 elfnote_val(XEN_ELFNOTE_ENTRY, xen_start)
 elfnote_val(XEN_ELFNOTE_HYPERCALL_PAGE, hypercall_page)
-elfnote_val(XEN_ELFNOTE_VIRT_BASE, 0)
+elfnote_val(XEN_ELFNOTE_VIRT_BASE, OSV_KERNEL_VM_SHIFT)
 elfnote_str(XEN_ELFNOTE_XEN_VERSION, "xen-3.0")
 elfnote_str(XEN_ELFNOTE_GUEST_OS, "osv")
 elfnote_str(XEN_ELFNOTE_GUEST_VERSION, "?.?")
 elfnote_str(XEN_ELFNOTE_LOADER, "generic")
 elfnote_str(XEN_ELFNOTE_FEATURES, "!writable_page_tables")
 elfnote_str(XEN_ELFNOTE_BSD_SYMTAB, "yes")
+elfnote_val(XEN_ELFNOTE_PHYS32_ENTRY, hvm_xen_start-OSV_KERNEL_VM_SHIFT)
 
 .data
 
@@ -46,8 +47,15 @@ hypercall_page:
 .align 4096
 
 xen_start:
-    mov OSV_KERNEL_BASE, %ebp  // elf header; FIXME: determine dynamically
     mov %rsp, xen_bootstrap_end
     mov %rsi, %rdi
     call xen_init
+    mov $0x0, %rdi
     jmp start64
+
+.code32
+hvm_xen_start:
+    mov %ebx, hvm_xen_start_info-OSV_KERNEL_VM_SHIFT
+    mov $0x7c00, %esp # Allocate some temporary stack -> TODO: Probably unnecessary
+    mov $start32-OSV_KERNEL_VM_SHIFT, %eax
+    jmp *%eax

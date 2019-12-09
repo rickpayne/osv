@@ -22,6 +22,7 @@ standard_ec2_post_install = ['pip install awscli &&'
 
 class Fedora(object):
     name = 'Fedora'
+    pre_install = '(yum list installed compat-openssl10-devel 2>/dev/null && yum -y remove compat-openssl10-devel) || echo "package compat-openssl10-devel not found -> no need to remove it"'
     install = 'yum -y install --allowerasing'
     packages = [
                 'ant',
@@ -41,6 +42,7 @@ class Fedora(object):
                 'libstdc++-static',
                 'libtool',
                 'libvirt',
+                'make',
                 'maven',
                 'maven-shade-plugin',
                 'ncurses',
@@ -56,82 +58,48 @@ class Fedora(object):
                 'unzip',
                 'wget',
                 'yaml-cpp-devel',
+                'pax-utils',
                  ]
     ec2_packages = standard_ec2_packages
     test_packages = ['openssl-devel']
     ec2_post_install = standard_ec2_post_install
 
-    class Fedora_19(object):
-        packages = ['java-1.7.0-openjdk', 'python-requests', 'openssl-devel']
-        ec2_packages = []
-        test_packages = []
-        ec2_post_install = None
-        version = '19'
-
-    class Fedora_20(object):
-        packages = ['java-1.7.0-openjdk', 'python-requests', 'openssl-devel']
-        ec2_packages = []
-        test_packages = []
-        ec2_post_install = None
-        version = '20'
-
-    class Fedora_21(object):
-        packages = ['java-1.7.0-openjdk', 'python-requests', 'openssl-devel']
-        ec2_packages = []
-        test_packages = []
-        ec2_post_install = None
-        version = '21'
-
-    class Fedora_22(object):
-        packages = ['java-1.8.0-openjdk', 'python-requests', 'openssl-devel']
-        ec2_packages = []
-        test_packages = []
-        ec2_post_install = None
-        version = '22'
-
-    class Fedora_23(object):
-        packages = ['java-1.8.0-openjdk', 'python2-requests', 'openssl-devel']
-        ec2_packages = []
-        test_packages = []
-        ec2_post_install = None
-        version = '23'
-
-    class Fedora_24(object):
-        packages = ['java-1.8.0-openjdk', 'python2-requests', 'openssl-devel']
-        ec2_packages = []
-        test_packages = []
-        ec2_post_install = None
-        version = '24'
-
     class Fedora_25(object):
-        packages = ['java-1.8.0-openjdk', 'python2-requests', 'openssl-devel']
+        packages = ['java-1.8.0-openjdk', 'python2-requests', 'openssl-devel', 'lua-5.3.*', 'lua-devel-5.3.*']
         ec2_packages = []
         test_packages = []
         ec2_post_install = None
         version = '25'
 
     class Fedora_26(object):
-        packages = ['java-1.8.0-openjdk', 'python2-requests', 'compat-openssl10-devel']
+        packages = ['java-1.8.0-openjdk', 'python2-requests', 'openssl-devel', 'lua-5.3.*', 'lua-devel-5.3.*']
         ec2_packages = []
         test_packages = []
         ec2_post_install = None
         version = '26'
 
     class Fedora_27(object):
-        packages = ['java-1.8.0-openjdk', 'python2-requests', 'compat-openssl10-devel']
+        packages = ['java-1.8.0-openjdk', 'python2-requests', 'openssl-devel', 'lua-5.3.*', 'lua-devel-5.3.*']
         ec2_packages = []
         test_packages = []
         ec2_post_install = None
         version = '27'
 
     class Fedora_28(object):
-        packages = ['java-1.8.0-openjdk', 'python2-requests', 'compat-openssl10-devel']
+        packages = ['java-1.8.0-openjdk', 'python2-requests', 'openssl-devel', 'lua-5.3.*', 'lua-devel-5.3.*']
         ec2_packages = []
         test_packages = []
         ec2_post_install = None
         version = '28'
 
-    versions = [Fedora_19, Fedora_20, Fedora_21, Fedora_22, Fedora_23, Fedora_24, Fedora_25, Fedora_26, Fedora_27, Fedora_28]
+    class Fedora_29(object):
+        packages = ['java-1.8.0-openjdk', 'python2-requests', 'openssl-devel', 'lua-5.3.*', 'lua-devel-5.3.*']
+        ec2_packages = []
+        test_packages = []
+        ec2_post_install = None
+        version = '29'
+
+    versions = [Fedora_25, Fedora_26, Fedora_27, Fedora_28, Fedora_29]
 
 class RHELbased(Fedora):
     name = ['Scientific Linux', 'NauLinux', 'CentOS Linux', 'Red Hat Enterprise Linux', 'Oracle Linux']
@@ -189,6 +157,7 @@ class Debian(object):
                 'libssl-dev',
                 'libtool',
                 'libyaml-cpp-dev',
+                'make',
                 'maven',
                 'openssl',
                 'p11-kit',
@@ -244,8 +213,8 @@ class Ubuntu(object):
                 'libncurses5-dev',
                 'libssl-dev',
                 'libtool',
-                'libvirt-bin',
                 'libyaml-cpp-dev',
+                'make',
                 'maven',
                 'openssl',
                 'p11-kit',
@@ -256,55 +225,51 @@ class Ubuntu(object):
                 'tcpdump',
                 'unzip',
                 'wget',
+                'lua5.3',
+                'liblua5.3',
+                'pax-utils',
                 ]
 
     ec2_packages = standard_ec2_packages
     test_packages = ['libssl-dev', 'zip']
     ec2_post_install = None
 
+    class Ubuntu_19_04(object):
+        packages = ['openjdk-8-jdk', 'bridge-utils', 'libvirt-daemon-system', 'libvirt-clients']
+        ec2_packages = ['ec2-api-tools', 'awscli']
+        test_packages = []
+        ec2_post_install = None
+        version = '19.04'
+
+    class Ubuntu_18_10(object):
+        packages = ['openjdk-8-jdk', 'bridge-utils', 'libvirt-daemon-system', 'libvirt-clients']
+        ec2_packages = ['ec2-api-tools', 'awscli']
+        test_packages = []
+        ec2_post_install = None
+        version = '18.10'
+
     class Ubuntu_18_04(object):
-        packages = ['openjdk-8-jdk', 'bridge-utils']
+        packages = ['openjdk-8-jdk', 'bridge-utils', 'libvirt-bin']
         ec2_packages = ['ec2-api-tools', 'awscli']
         test_packages = []
         ec2_post_install = None
         version = '18.04'
 
     class Ubuntu_17_04(object):
-        packages = ['openjdk-8-jdk']
+        packages = ['openjdk-8-jdk', 'libvirt-bin']
         ec2_packages = ['ec2-api-tools', 'awscli']
         test_packages = []
         ec2_post_install = None
         version = '17.04'
 
     class Ubuntu_16_04(object):
-        packages = ['openjdk-8-jdk']
+        packages = ['openjdk-8-jdk', 'libvirt-bin']
         ec2_packages = ['ec2-api-tools', 'awscli']
         test_packages = []
         ec2_post_install = None
         version = '16.04'
 
-    class Ubuntu_15_04(object):
-        packages = ['openjdk-7-jdk']
-        ec2_packages = ['ec2-api-tools', 'awscli']
-        test_packages = []
-        ec2_post_install = None
-        version = '15.04'
-
-    class Ubuntu_14_04(object):
-        packages = ['openjdk-7-jdk']
-        ec2_packages = ['ec2-api-tools', 'awscli']
-        test_packages = []
-        ec2_post_install = None
-        version = '14.04'
-
-    class Ubuntu_13_10(object):
-        packages = ['openjdk-7-jdk']
-        ec2_packages = []
-        test_packages = []
-        ec2_post_install = standard_ec2_post_install
-        version = '13.10'
-
-    versions = [Ubuntu_18_04, Ubuntu_17_04, Ubuntu_16_04, Ubuntu_15_04, Ubuntu_14_04, Ubuntu_13_10]
+    versions = [Ubuntu_19_04, Ubuntu_18_10, Ubuntu_18_04, Ubuntu_17_04, Ubuntu_16_04]
 
 class LinuxMint(Ubuntu):
     name = 'LinuxMint'
@@ -353,6 +318,8 @@ for distro in distros:
     if name.startswith(distro.name):
         for dver in distro.versions:
             if dver.version == version or version.startswith(dver.version+'.'):
+                if hasattr(distro, 'pre_install'):
+                    subprocess.check_call(distro.pre_install, shell=True)
                 pkg = distro.packages + dver.packages
                 if cmdargs.ec2:
                     pkg += distro.ec2_packages + dver.ec2_packages

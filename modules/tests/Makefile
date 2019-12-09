@@ -62,6 +62,17 @@ $(out)/%.so: $(out)/%.o
 
 $(out)/tests/tst-non-fpic.o: CXXFLAGS:=$(subst -fPIC,-mcmodel=large,$(CXXFLAGS))
 
+$(out)/tests/tst-getopt-pie.o: CXXFLAGS:=$(subst -fPIC,-fpie,$(CXXFLAGS))
+$(out)/tests/tst-getopt-pie.o: $(src)/tests/tst-getopt.cc
+	$(makedir)
+	$(call quiet, $(CXX) $(CXXFLAGS) -c -o $@ $<, CXX tests/tst-getopt-pie.cc)
+$(out)/tests/tst-getopt-pie.so: $(out)/tests/tst-getopt-pie.o
+	$(call quiet, $(CXX) $(CXXFLAGS) -pie -o $@ $< $(LIBS), LD tests/tst-getopt-pie.so)
+
+$(out)/tests/tst-non-pie.so: CXXFLAGS:=$(subst -fPIC,-no-pie,$(CXXFLAGS))
+$(out)/tests/tst-non-pie.so: $(src)/tests/tst-non-pie.cc
+	$(call quiet, $(CXX) $(CXXFLAGS) -o $@ $< $(LIBS), LD tests/tst-non-pie.so)
+
 # The rofs test image mounts /tmp as ramfs and 4 tests that exercise file system
 # fail due to some unresolved bugs or other shortcomings of the ramfs implementation
 # and are temporarily removed from the rofs-only-tests list. The tests tst-readdir.so
@@ -98,7 +109,7 @@ tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-bsd-evh.so \
 	tst-dns-resolver.so tst-kill.so tst-truncate.so \
 	misc-panic.so tst-utimes.so tst-utimensat.so tst-futimesat.so \
 	misc-tcp.so tst-strerror_r.so misc-random.so misc-urandom.so \
-	tst-commands.so tst-threadcomplete.so tst-timerfd.so \
+	tst-commands.so tst-options.so tst-threadcomplete.so tst-timerfd.so \
 	tst-nway-merger.so tst-memmove.so tst-pthread-clock.so misc-procfs.so \
 	tst-chdir.so tst-chmod.so tst-hello.so misc-concurrent-io.so \
 	tst-concurrent-init.so tst-ring-spsc-wraparound.so tst-shm.so \
@@ -108,7 +119,7 @@ tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-bsd-evh.so \
 	tst-sendfile.so misc-lock-perf.so tst-uio.so tst-printf.so \
 	tst-pthread-affinity.so tst-pthread-tsd.so tst-thread-local.so \
 	tst-zfs-mount.so tst-regex.so tst-tcp-siocoutq.so \
-	libtls.so tst-tls.so tst-select-timeout.so tst-faccessat.so \
+	libtls.so tst-tls.so tst-tls-pie.so tst-select-timeout.so tst-faccessat.so \
 	tst-fstatat.so misc-reboot.so tst-fcntl.so payload-namespace.so \
 	tst-namespace.so tst-without-namespace.so payload-env.so \
 	payload-merge-env.so misc-execve.so misc-execve-payload.so misc-mutex2.so \
@@ -116,8 +127,8 @@ tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-bsd-evh.so \
 	tst-ifaddrs.so tst-pthread-affinity-inherit.so tst-sem-timed-wait.so \
 	tst-ttyname.so tst-pthread-barrier.so tst-feexcept.so tst-math.so \
 	tst-sigaltstack.so tst-fread.so tst-tcp-cork.so tst-tcp-v6.so \
-	tst-calloc.so tst-crypt.so tst-non-fpic.so tst-small-malloc.so
-
+	tst-calloc.so tst-crypt.so tst-non-fpic.so tst-small-malloc.so \
+	tst-mmx-fpu.so tst-getopt.so tst-getopt-pie.so tst-non-pie.so tst-semaphore.so
 #	libstatic-thread-variable.so tst-static-thread-variable.so \
 
 tests += testrunner.so
@@ -139,7 +150,17 @@ $(out)/tests/tst-tls.so: \
 		$(src)/tests/tst-tls.cc \
 		$(out)/tests/libtls.so
 	$(makedir)
-	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) -shared -o $@ $< tests/libtls.so, CXX tst-tls.so)
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) -D__SHARED_OBJECT__=1 -shared -o $@ $< tests/libtls.so, CXX tests/tst-tls.cc)
+
+$(out)/tests/tst-tls-pie.o: CXXFLAGS:=$(subst -fPIC,-fpie,$(CXXFLAGS))
+$(out)/tests/tst-tls-pie.o: $(src)/tests/tst-tls.cc
+	$(makedir)
+	$(call quiet, $(CXX) $(CXXFLAGS) -c -o $@ $<, CXX tests/tst-tls-pie.cc)
+$(out)/tests/tst-tls-pie.so: \
+		$(out)/tests/tst-tls-pie.o \
+		$(out)/tests/libtls.so
+	$(makedir)
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) -fuse-ld=bfd -pthread -pie -o $@ $< tests/libtls.so, LD tests/tst-tls-pie.so)
 
 boost-tests := tst-vfs.so tst-libc-locking.so misc-fs-stress.so \
 	misc-bdev-write.so misc-bdev-wlatency.so misc-bdev-rw.so \

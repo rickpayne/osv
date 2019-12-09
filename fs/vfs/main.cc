@@ -587,10 +587,6 @@ extern "C"
 int __fxstatat(int ver, int dirfd, const char *pathname, struct stat *st,
         int flags)
 {
-    if (flags & AT_SYMLINK_NOFOLLOW) {
-        UNIMPLEMENTED("fstatat() with AT_SYMLINK_NOFOLLOW");
-    }
-
     if (pathname[0] == '/' || dirfd == AT_FDCWD) {
         return stat(pathname, st);
     }
@@ -618,7 +614,12 @@ int __fxstatat(int ver, int dirfd, const char *pathname, struct stat *st,
     strlcat(p, "/", PATH_MAX);
     strlcat(p, pathname, PATH_MAX);
 
-    error = stat(p, st);
+    if (flags & AT_SYMLINK_NOFOLLOW) {
+        error = lstat(p, st);
+    }
+    else {
+        error = stat(p, st);
+    }
 
     vn_unlock(vp);
     fdrop(fp);
@@ -1453,6 +1454,10 @@ int fcntl(int fd, int cmd, int arg)
     // ignored in OSv anyway, as it doesn't support exec().
     switch (cmd) {
     case F_DUPFD:
+    // On Linux F_DUPFD_CLOEXEC is used to affect behavior of duplicated file descriptor
+    // across execve() boundaries, but on OSv there is single process so we make it
+    // behave exactly like F_DUPFD does
+    case F_DUPFD_CLOEXEC:
         error = _fdalloc(fp, &ret, arg);
         if (error)
             goto out_errno;
@@ -1758,6 +1763,39 @@ ssize_t readlink(const char *pathname, char *buf, size_t bufsize)
     out_errno:
     errno = error;
     return -1;
+}
+
+ssize_t readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsize)
+{
+    if (pathname[0] == '/' || dirfd == AT_FDCWD) {
+        return readlink(pathname, buf, bufsize);
+    }
+
+    struct file *fp;
+    int error = fget(dirfd, &fp);
+    if (error) {
+        errno = error;
+        return -1;
+    }
+
+    struct vnode *vp = fp->f_dentry->d_vnode;
+    vn_lock(vp);
+
+    std::unique_ptr<char []> up (new char[PATH_MAX]);
+    char *p = up.get();
+
+    /* build absolute path */
+    strlcpy(p, fp->f_dentry->d_mount->m_path, PATH_MAX);
+    strlcat(p, fp->f_dentry->d_path, PATH_MAX);
+    strlcat(p, "/", PATH_MAX);
+    strlcat(p, pathname, PATH_MAX);
+
+    error = readlink(p, buf, bufsize);
+
+    vn_unlock(vp);
+    fdrop(fp);
+
+    return error;
 }
 
 TRACEPOINT(trace_vfs_fallocate, "%d %d 0x%x 0x%x", int, int, loff_t, loff_t);

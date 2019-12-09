@@ -21,9 +21,9 @@
 #define virtio_w(...)   tprintf_w(virtio_tag, __VA_ARGS__)
 #define virtio_e(...)   tprintf_e(virtio_tag, __VA_ARGS__)
 
-TRACEPOINT(trace_vring_get_buf_finalize, "vring=%p: _used_ring_host_head %d",
+static TRACEPOINT(trace_vring_get_buf_finalize, "vring=%p: _used_ring_host_head %d",
                                          void*, int);
-TRACEPOINT(trace_vring_update_used_event, "vring=%p: _used_ring_host_head %d",
+static TRACEPOINT(trace_vring_update_used_event, "vring=%p: _used_ring_host_head %d",
                                           void*, int);
 
 namespace virtio {
@@ -122,11 +122,15 @@ class virtio_driver;
     class vring {
     public:
 
-        vring(virtio_driver* const dev, u16 num, u16 q_index);
+        vring(virtio_driver* const driver, u16 num, u16 q_index);
         virtual ~vring();
 
         u64 get_paddr();
         static unsigned get_size(unsigned int num, unsigned long align);
+
+        u64 get_desc_addr();
+        u64 get_avail_addr();
+        u64 get_used_addr();
 
         // Ring operations
         bool add_buf(void* cookie);
@@ -143,6 +147,7 @@ class virtio_driver;
          *
          * @param update_host if TRUE - update the host as well
          */
+        __attribute__((always_inline)) inline // Necessary because of issue #1029
         void get_buf_finalize(bool update_host = true) {
             _used_ring_host_head++;
 
@@ -153,6 +158,7 @@ class virtio_driver;
             }
         }
 
+        __attribute__((always_inline)) inline // Necessary because of issue #1029
         void update_used_event() {
             // only let the host know about our used idx in case irq are enabled
             if (_avail->interrupt_on()) {
@@ -182,6 +188,8 @@ class virtio_driver;
         bool kick();
         // Total number of descriptors in ring
         int size() {return _num;}
+
+        u16 index() {return _q_index; }
 
         // Use memory order acquire when there are prior updates to local variables that must
         // be seen by the reading threads
@@ -240,7 +248,7 @@ class virtio_driver;
     private:
 
         // Up pointer
-        virtio_driver* _dev;
+        virtio_driver* _driver;
         u16 _q_index;
         // The physical of the physical address handed to the virtio device
         void* _vring_ptr;

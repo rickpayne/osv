@@ -156,6 +156,14 @@ static long get_mempolicy(int *policy, unsigned long *nmask,
     return 0;
 }
 
+static long set_mempolicy(int policy, unsigned long *nmask,
+        unsigned long maxnode)
+{
+    // OSv has very minimal support for NUMA - merely exposes
+    // all cpus as a single node0 and cannot really apply any meaningful policy
+    // Therefore we implement this as noop, ignore all arguments and return success
+    return 0;
+}
 
 // As explained in the sched_getaffinity(2) manual page, the interface of the
 // sched_getaffinity() function is slightly different than that of the actual
@@ -178,6 +186,14 @@ static int sched_getaffinity_syscall(
             ret = std::min(len, sched::max_cpus / 8);
         }
         return ret;
+}
+
+#define __NR_sched_setaffinity_syscall __NR_sched_setaffinity
+static int sched_setaffinity_syscall(
+        pid_t pid, unsigned len, unsigned long *mask)
+{
+    return sched_setaffinity(
+            pid, len, reinterpret_cast<cpu_set_t *>(mask));
 }
 
 // Only void* return value of mmap is type casted, as syscall returns long.
@@ -318,6 +334,13 @@ static int sys_exit(int ret)
     return 0;
 }
 
+#define __NR_sys_exit_group __NR_exit_group
+static int sys_exit_group(int ret)
+{
+    exit(ret);
+    return 0;
+}
+
 #define __NR_sys_ioctl __NR_ioctl
 //
 // We need to define explicit sys_ioctl that takes these 3 parameters to conform
@@ -344,18 +367,6 @@ static int pselect6(int nfds, fd_set *readfds, fd_set *writefds,
     }
 
     return pselect(nfds, readfds, writefds, exceptfds, timeout_ts, NULL);
-}
-
-static int epoll_pwait(int epfd, struct epoll_event *events, int maxevents,
-                       int timeout_ms, void *sig)
-{
-    if(sig) {
-        WARN_ONCE("epoll_pwait(): unimplemented with not-null sigmask\n");
-        errno = ENOSYS;
-        return -1;
-    }
-
-    return epoll_wait(epfd, events, maxevents, timeout_ms);
 }
 
 long syscall(long number, ...)
@@ -417,9 +428,15 @@ long syscall(long number, ...)
     SYSCALL4(pread64, int, void *, size_t, off_t);
     SYSCALL2(ftruncate, int, off_t);
     SYSCALL1(fsync, int);
-    SYSCALL5(epoll_pwait, int, struct epoll_event *, int, int, void*);
+    SYSCALL5(epoll_pwait, int, struct epoll_event *, int, int, const sigset_t*);
     SYSCALL3(getrandom, char *, size_t, unsigned int);
     SYSCALL2(nanosleep, const struct timespec*, struct timespec *);
+    SYSCALL4(fstatat, int, const char *, struct stat *, int);
+    SYSCALL1(sys_exit_group, int);
+    SYSCALL4(readlinkat, int, const char *, char *, size_t);
+    SYSCALL0(getpid);
+    SYSCALL3(set_mempolicy, int, unsigned long *, unsigned long);
+    SYSCALL3(sched_setaffinity_syscall, pid_t, unsigned, unsigned long *);
     }
 
     debug_always("syscall(): unimplemented system call %d\n", number);

@@ -1,9 +1,9 @@
-INCLUDES = -I. -I../../include -I../../arch/$(ARCH) -I../.. \
-        -I../../build/$(mode)/gen/include
+SRC = $(shell readlink -f ../..)
+include $(SRC)/modules/java-base/common.gmk
 
 autodepend = -MD -MT $@ -MP
 CXXFLAGS  = -g -rdynamic -Wall -std=c++11 -fPIC $(INCLUDES) $(autodepend)
-src = ../..
+src = $(SRC)
 arch = x64
 
 boost-libs := -lboost_system -lboost_filesystem
@@ -44,9 +44,8 @@ obj/%.o: %.cc
 	$(call quiet, $(CXX) $(CXXFLAGS) -c -o $@ $<, CXX $@)
 
 clean:
-	$(call quiet, $(RM) $(TARGET), CLEAN)
-	$(call very-quiet, $(RM) $(TARGET).so)
-	$(call very-quiet, $(RM) -rf obj/*)
+	$(call quiet, $(RM) -f $(TARGET).so tst-template, CLEAN)
+	$(call very-quiet, $(RM) -rf obj)
 
 ifneq ($(MAKECMDGOALS),clean)
 -include $(DEPS)

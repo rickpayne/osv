@@ -12,17 +12,20 @@
 #include "processor.hh"
 #include "cpuid.hh"
 #include "exceptions.hh"
+#include "arch-setup.hh"
 #include <osv/interrupt.hh>
 #include <osv/sched.hh>
 #include <bsd/porting/pcpu.h>
 #include <machine/xen/xen-os.h>
 #include <xen/evtchn.h>
+#include <xen/interface/arch-x86/hvm/start_info.h>
 
 shared_info_t *HYPERVISOR_shared_info;
 uint8_t xen_features[XENFEAT_NR_SUBMAPS * 32];
 // make sure xen_start_info is not in .bss, or it will be overwritten
 // by init code, as xen_init() is called before .bss initialization
 struct start_info* xen_start_info __attribute__((section(".data")));
+struct hvm_start_info* hvm_xen_start_info __attribute__((section(".data")));
 
 namespace xen {
 
@@ -169,37 +172,37 @@ gsi_level_interrupt *xen_set_callback(int irqno)
 
 void xen_init(processor::features_type &features, unsigned base)
 {
-        // Base + 1 would have given us the version number, it is mostly
-        // uninteresting for us now
-        auto x = processor::cpuid(base + 2);
-        processor::wrmsr(x.b, cast_pointer(&hypercall_page));
+    // Base + 1 would have given us the version number, it is mostly
+    // uninteresting for us now
+    auto x = processor::cpuid(base + 2);
+    processor::wrmsr(x.b, cast_pointer(&hypercall_page) - OSV_KERNEL_VM_SHIFT);
 
-        struct xen_feature_info info;
-        // To fill up the array used by C code
-        for (int i = 0; i < XENFEAT_NR_SUBMAPS; i++) {
-            info.submap_idx = i;
-            if (version_hypercall(XENVER_get_features, &info) < 0)
-                assert(0);
-            for (int j = 0; j < 32; j++)
-                xen_features[i * 32 + j] = !!(info.submap & 1<<j);
-        }
-        features.xen_clocksource = xen_features[9] & 1;
-        features.xen_vector_callback = xen_features[8] & 1;
-        if (!features.xen_vector_callback)
-            evtchn_irq_is_legacy();
-
-        struct xen_add_to_physmap map;
-        map.domid = DOMID_SELF;
-        map.idx = 0;
-        map.space = 0;
-        map.gpfn = cast_pointer(&xen_shared_info) >> 12;
-
-        // 7 => add to physmap
-        if (memory_hypercall(XENMEM_add_to_physmap, &map))
+    struct xen_feature_info info;
+    // To fill up the array used by C code
+    for (int i = 0; i < XENFEAT_NR_SUBMAPS; i++) {
+        info.submap_idx = i;
+        if (version_hypercall(XENVER_get_features, &info) < 0)
             assert(0);
+        for (int j = 0; j < 32; j++)
+            xen_features[i * 32 + j] = !!(info.submap & 1<<j);
+    }
+    features.xen_clocksource = xen_features[9] & 1;
+    features.xen_vector_callback = xen_features[8] & 1;
+    if (!features.xen_vector_callback)
+        evtchn_irq_is_legacy();
 
-        features.xen_pci = xen_pci_enabled();
-        HYPERVISOR_shared_info = reinterpret_cast<shared_info_t *>(&xen_shared_info);
+    struct xen_add_to_physmap map;
+    map.domid = DOMID_SELF;
+    map.idx = 0;
+    map.space = 0;
+    map.gpfn = (cast_pointer(&xen_shared_info) - OSV_KERNEL_VM_SHIFT) >> 12;
+
+    // 7 => add to physmap
+    if (memory_hypercall(XENMEM_add_to_physmap, &map))
+        assert(0);
+
+    features.xen_pci = xen_pci_enabled();
+    HYPERVISOR_shared_info = reinterpret_cast<shared_info_t *>(&xen_shared_info);
 }
 
 void irq_init()
@@ -220,5 +223,36 @@ extern "C"
 void xen_init(struct start_info* si)
 {
     xen_start_info = si;
+}
+
+#define OSV_MULTI_BOOT_INFO_ADDR      0x1000
+#define OSV_E820_TABLE_ADDR           0x2000
+
+extern "C"
+void hvm_xen_extract_boot_params()
+{
+    // Set location of multiboot info struct at arbitrary place in lower memory
+    // to copy to (happens to be the same as in boot16.S)
+    osv_multiboot_info_type* mb_info = reinterpret_cast<osv_multiboot_info_type*>(OSV_MULTI_BOOT_INFO_ADDR);
+
+    // Copy command line pointer from boot params
+    mb_info->mb.cmdline = hvm_xen_start_info->cmdline_paddr;
+
+    // Copy e820 information from boot params
+    mb_info->mb.mmap_length = 0;
+    mb_info->mb.mmap_addr = OSV_E820_TABLE_ADDR;
+
+    struct hvm_memmap_table_entry *source_e820_table = reinterpret_cast<struct hvm_memmap_table_entry *>(hvm_xen_start_info->memmap_paddr);
+    struct e820ent *dest_e820_table = reinterpret_cast<struct e820ent *>(mb_info->mb.mmap_addr);
+
+    for (uint32_t e820_index = 0; e820_index < hvm_xen_start_info->memmap_entries; e820_index++) {
+        dest_e820_table[e820_index].ent_size = 20;
+        dest_e820_table[e820_index].type = source_e820_table[e820_index].type;
+        dest_e820_table[e820_index].addr = source_e820_table[e820_index].addr;
+        dest_e820_table[e820_index].size = source_e820_table[e820_index].size;
+        mb_info->mb.mmap_length += sizeof(e820ent);
+    }
+
+    reset_bootchart(mb_info);
 }
 }

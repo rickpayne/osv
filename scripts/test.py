@@ -22,11 +22,18 @@ blacklist= [
     "tst-feexcept.so",
 ]
 
+firecracker_blacklist= [
+    "tracing_smoke_test",
+    "tcp_close_without_reading", #This test is flaky under firecracker due to a bug possibly in firecracker itself
+]
+
 add_tests([
     SingleCommandTest('java_isolated', '/java_isolated.so -cp /tests/java/tests.jar:/tests/java/isolates.jar \
         -Disolates.jar=/tests/java/isolates.jar org.junit.runner.JUnitCore io.osv.AllTestsThatTestIsolatedApp'),
     SingleCommandTest('java_non_isolated', '/java.so -cp /tests/java/tests.jar:/tests/java/isolates.jar \
         -Disolates.jar=/tests/java/isolates.jar org.junit.runner.JUnitCore io.osv.AllTestsThatTestNonIsolatedApp'),
+    SingleCommandTest('java_no_wrapper', '/usr/bin/java -cp /tests/java/tests.jar \
+        org.junit.runner.JUnitCore io.osv.BasicTests !'),
     SingleCommandTest('java-perms', '/java_isolated.so -cp /tests/java/tests.jar io.osv.TestDomainPermissions'),
 ])
 
@@ -57,6 +64,8 @@ def run_test(test):
 
     start = time.time()
     try:
+        test.set_run_py_args(run_py_args)
+        test.set_hypervisor(cmdargs.hypervisor)
         test.run()
     except:
         sys.stdout.write("Test %s FAILED\n" % test.name)
@@ -75,7 +84,7 @@ def run_tests_in_single_instance():
     run(filter(lambda test: not isinstance(test, TestRunnerTest), tests))
 
     blacklist_tests = ' '.join(blacklist)
-    args = ["-s", "-e", "/testrunner.so -b %s" % (blacklist_tests)]
+    args = run_py_args + ["-s", "-e", "/testrunner.so -b %s" % (blacklist_tests)]
     if subprocess.call(["./scripts/run.py"] + args):
         exit(1)
 
@@ -181,7 +190,15 @@ if __name__ == "__main__":
     parser.add_argument("-r", "--repeat", action="store_true", help="repeat until test fails")
     parser.add_argument("-s", "--single", action="store_true", help="run as much tests as possible in a single OSv instance")
     parser.add_argument("-n", "--nfs",    action="store_true", help="run nfs test in a single OSv instance")
+    parser.add_argument("-p", "--hypervisor", action="store", default="qemu", help="choose hypervisor to run: qemu, firecracker")
     parser.add_argument("--name", action="store", help="run all tests whose names match given regular expression")
+    parser.add_argument("--run_options", action="store", help="pass extra options to run.py")
     cmdargs = parser.parse_args()
     set_verbose_output(cmdargs.verbose)
+    if cmdargs.run_options != None:
+        run_py_args = cmdargs.run_options.split()
+    else:
+        run_py_args = []
+    if cmdargs.hypervisor == 'firecracker':
+        blacklist.extend(firecracker_blacklist)
     main()
