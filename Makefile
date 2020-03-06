@@ -112,16 +112,12 @@ endif
 #   musl/ -  for some of the header files (symbolic links in include/api) and
 #            some of the source files ($(musl) below).
 #   external/x64/acpica - for the ACPICA library (see $(acpi) below).
-#   external/x64/openjdk.bin - for $(java-targets) below.
 # Additional submodules are need when certain make parameters are used.
 ifeq (,$(wildcard musl/include))
     $(error Missing musl/ directory. Please run "git submodule update --init --recursive")
 endif
 ifeq (,$(wildcard external/x64/acpica/source))
     $(error Missing external/x64/acpica/ directory. Please run "git submodule update --init --recursive")
-endif
-ifeq (,$(wildcard external/x64/openjdk.bin/usr))
-    $(error Missing external/x64/openjdk.bin/ directory. Please run "git submodule update --init --recursive")
 endif
 
 # This makefile wraps all commands with the $(quiet) or $(very-quiet) macros
@@ -231,12 +227,8 @@ local-includes =
 INCLUDES = $(local-includes) -Iarch/$(arch) -I. -Iinclude  -Iarch/common
 INCLUDES += -isystem include/glibc-compat
 
-glibcbase = external/$(arch)/glibc.bin
 gccbase = external/$(arch)/gcc.bin
 miscbase = external/$(arch)/misc.bin
-jdkbase := $(shell find external/$(arch)/openjdk.bin/usr/lib/jvm \
-                         -maxdepth 1 -type d -name 'java*')
-
 
 ifeq ($(gcc_include_env), external)
   gcc-inc-base := $(dir $(shell find $(gccbase)/ -name vector | grep -v -e debug/vector$$ -e profile/vector$$))
@@ -320,7 +312,6 @@ COMMON = $(autodepend) -g -Wall -Wno-pointer-arith $(CFLAGS_WERROR) -Wformat=0 -
 	$(kernel-defines) \
 	-fno-omit-frame-pointer $(compiler-specific) \
 	-include compiler/include/intrinsics.hh \
-	$(do-sys-includes) \
 	$(arch-cflags) $(conf-opt) $(acpi-defines) $(tracing-flags) $(gcc-sysroot) \
 	$(configuration) -D__OSV__ -D__XEN_INTERFACE_VERSION__="0x00030207" -DARCH_STRING=$(ARCH_STR) $(EXTRA_FLAGS)
 ifeq ($(gcc_include_env), external)
@@ -384,10 +375,7 @@ $(out)/%.o: %.s
 	$(makedir)
 	$(q-build-so)
 
-sys-includes = $(jdkbase)/include $(jdkbase)/include/linux
 autodepend = -MD -MT $@ -MP
-
-do-sys-includes = $(foreach inc, $(sys-includes), -isystem $(inc))
 
 tools := tools/mkfs/mkfs.so tools/cpiod/cpiod.so
 
@@ -817,9 +805,6 @@ drivers += drivers/clock.o
 drivers += drivers/clock-common.o
 drivers += drivers/clockevent.o
 drivers += core/elf.o
-drivers += java/jvm/jvm_balloon.o
-drivers += java/jvm/java_api.o
-drivers += java/jvm/jni_helpers.o
 drivers += drivers/random.o
 drivers += drivers/zfs.o
 drivers += drivers/null.o
@@ -844,6 +829,7 @@ drivers += drivers/vmxnet3-queues.o
 drivers += drivers/virtio-blk.o
 drivers += drivers/virtio-scsi.o
 drivers += drivers/virtio-rng.o
+drivers += drivers/virtio-fs.o
 drivers += drivers/kvmclock.o drivers/xenclock.o drivers/hypervclock.o
 drivers += drivers/acpi.o
 drivers += drivers/hpet.o
@@ -866,6 +852,7 @@ drivers += drivers/virtio-vring.o
 drivers += drivers/virtio-rng.o
 drivers += drivers/virtio-blk.o
 drivers += drivers/virtio-net.o
+drivers += drivers/virtio-fs.o
 endif # aarch64
 
 objects += arch/$(arch)/arch-trace.o
@@ -1585,6 +1572,7 @@ libc += stdlib/strtod.o
 libc += stdlib/wcstol.o
 
 libc += string/__memcpy_chk.o
+libc += string/explicit_bzero.o
 libc += string/__explicit_bzero_chk.o
 musl += string/bcmp.o
 musl += string/bcopy.o
@@ -1808,6 +1796,9 @@ fs_objs += rofs/rofs_vfsops.o \
 	rofs/rofs_cache.o \
 	rofs/rofs_common.o
 
+fs_objs += virtiofs/virtiofs_vfsops.o \
+	virtiofs/virtiofs_vnops.o
+
 fs_objs += pseudofs/pseudofs.o
 fs_objs += procfs/procfs_vnops.o
 fs_objs += sysfs/sysfs_vnops.o
@@ -1937,11 +1928,16 @@ $(bootfs_manifest_dep): phony
 		echo -n $(bootfs_manifest) > $(bootfs_manifest_dep) ; \
 	fi
 
+ifeq ($(arch),x64)
+libgcc_s_dir := $(dir $(shell $(CC) -print-file-name=libgcc_s.so.1))
+else
+libgcc_s_dir := ../../$(gccbase)/lib64
+endif
+
 $(out)/bootfs.bin: scripts/mkbootfs.py $(bootfs_manifest) $(bootfs_manifest_dep) $(tools:%=$(out)/%) \
 		$(out)/zpool.so $(out)/zfs.so $(out)/libenviron.so $(out)/libvdso.so
 	$(call quiet, olddir=`pwd`; cd $(out); "$$olddir"/scripts/mkbootfs.py -o bootfs.bin -d bootfs.bin.d -m "$$olddir"/$(bootfs_manifest) \
-		-D jdkbase="$$olddir"/$(jdkbase) -D gccbase="$$olddir"/$(gccbase) -D \
-		glibcbase="$$olddir"/$(glibcbase) -D miscbase="$$olddir"/$(miscbase), MKBOOTFS $@)
+		-D libgcc_s_dir=$(libgcc_s_dir), MKBOOTFS $@)
 
 $(out)/bootfs.o: $(out)/bootfs.bin
 $(out)/bootfs.o: ASFLAGS += -I$(out)

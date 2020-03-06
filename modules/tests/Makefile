@@ -119,7 +119,7 @@ tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-bsd-evh.so \
 	tst-sendfile.so misc-lock-perf.so tst-uio.so tst-printf.so \
 	tst-pthread-affinity.so tst-pthread-tsd.so tst-thread-local.so \
 	tst-zfs-mount.so tst-regex.so tst-tcp-siocoutq.so \
-	libtls.so tst-tls.so tst-tls-pie.so tst-select-timeout.so tst-faccessat.so \
+	libtls.so libtls_gold.so tst-tls.so tst-tls-gold.so tst-tls-pie.so tst-select-timeout.so tst-faccessat.so \
 	tst-fstatat.so misc-reboot.so tst-fcntl.so payload-namespace.so \
 	tst-namespace.so tst-without-namespace.so payload-env.so \
 	payload-merge-env.so misc-execve.so misc-execve-payload.so misc-mutex2.so \
@@ -128,7 +128,8 @@ tests := tst-pthread.so misc-ramdisk.so tst-vblk.so tst-bsd-evh.so \
 	tst-ttyname.so tst-pthread-barrier.so tst-feexcept.so tst-math.so \
 	tst-sigaltstack.so tst-fread.so tst-tcp-cork.so tst-tcp-v6.so \
 	tst-calloc.so tst-crypt.so tst-non-fpic.so tst-small-malloc.so \
-	tst-mmx-fpu.so tst-getopt.so tst-getopt-pie.so tst-non-pie.so tst-semaphore.so
+	tst-mmx-fpu.so tst-getopt.so tst-getopt-pie.so tst-non-pie.so tst-semaphore.so \
+	tst-elf-init.so
 #	libstatic-thread-variable.so tst-static-thread-variable.so \
 
 tests += testrunner.so
@@ -146,6 +147,8 @@ $(out)/tests/tst-mmap.so: COMMON += -fuse-ld=bfd
 $(out)/tests/tst-elf-permissions.so: COMMON += -fuse-ld=bfd
 $(out)/tests/tst-tls.so: COMMON += -fuse-ld=bfd
 
+$(out)/tests/tst-dlfcn.so: COMMON += -rdynamic -ldl
+
 $(out)/tests/tst-tls.so: \
 		$(src)/tests/tst-tls.cc \
 		$(out)/tests/libtls.so
@@ -162,6 +165,20 @@ $(out)/tests/tst-tls-pie.so: \
 	$(makedir)
 	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) -fuse-ld=bfd -pthread -pie -o $@ $< tests/libtls.so, LD tests/tst-tls-pie.so)
 
+$(out)/tests/libtls_gold.so: COMMON += -fuse-ld=gold
+$(out)/tests/libtls_gold.so: $(out)/tests/libtls.o
+	$(makedir)
+	$(call quiet, $(CXX) $(CXXFLAGS) -shared -o $@ $< $(LIBS), LD tests/libtls_gold.so)
+
+$(out)/tests/tst-tls-gold.so: COMMON += -fuse-ld=gold
+$(out)/tests/tst-tls-gold.so: \
+		$(src)/tests/tst-tls.cc \
+		$(out)/tests/libtls_gold.so
+	$(makedir)
+	$(call quiet, cd $(out); $(CXX) $(CXXFLAGS) -D__SHARED_OBJECT__=1 -shared -o $@ $< tests/libtls_gold.so, CXX tests/tst-tls.cc)
+
+boost-lib-dir := $(dir $(shell $(CC) --print-file-name libboost_system.so))
+
 boost-tests := tst-vfs.so tst-libc-locking.so misc-fs-stress.so \
 	misc-bdev-write.so misc-bdev-wlatency.so misc-bdev-rw.so \
 	tst-promise.so tst-dlfcn.so tst-stat.so tst-wait-for.so \
@@ -177,12 +194,9 @@ zfs-only-boost-tests := tst-rename.so
 
 boost-tests += $($(fs_type)-only-boost-tests)
 
-BOOSTLIBS=$(src)/external/$(ARCH)/misc.bin/usr/lib64
 $(boost-tests:%=$(out)/tests/%): LIBS += \
-	 $(BOOSTLIBS)/libboost_unit_test_framework.so \
-	 $(BOOSTLIBS)/libboost_filesystem.so
-$(boost-tests:%=$(out)/tests/%): CXXFLAGS += -D_GLIBCXX_USE_CXX11_ABI=0 \
-	-isystem $(src)/external/$(ARCH)/misc.bin/usr/include
+	-lboost_unit_test_framework \
+	-lboost_filesystem
 
 tests += $(boost-tests)
 
@@ -220,9 +234,10 @@ build_all_tests: $(all_tests:%=$(out)/%)
 .PHONY: build_all_tests clean
 
 # Automatically generate usr.manifest which includes all tests.
-usr.manifest: $(lastword $(MAKEFILE_LIST)) usr.manifest.skel FORCE
+usr.manifest: build_all_tests $(lastword $(MAKEFILE_LIST)) usr.manifest.skel FORCE
 	@echo "  generating modules/tests/usr.manifest"
 	@cat $@.skel > $@
+	@ldd $(addprefix $(out)/tests/,$(boost-tests)) | grep libboost | sed 's/ *[^ ] *\(.*\) => \(.*\) .*/\/usr\/lib\/\1: \2/' | sort | uniq >> $@
 	@echo $(all_tests) | tr ' ' '\n' | grep -v "tests/rofs/tst-.*.so" | awk '{print "/" $$0 ": ./" $$0}' >> $@
 	@echo $(all_tests) | tr ' ' '\n' | grep "tests/rofs/tst-.*.so" | sed 's/\.so//' | awk 'BEGIN { FS = "/" } ; { print "/tests/" $$3 "-rofs.so: ./tests/" $$2 "/" $$3 ".so"}' >> $@
 	./create_static.sh $(out) $(fs_type)
