@@ -74,7 +74,8 @@ class Basetest(unittest.TestCase):
                 return cls.is_jvm_up()
             else:
                 return True
-        except socket.error:
+        except socket.error as e:
+            print(e)
             return False
 
     def validate_path(self, api_definition, nickname, value):
@@ -85,9 +86,9 @@ class Basetest(unittest.TestCase):
         path = self.path_by_nick(api_definition, nickname)
         self.assertRegex(self.curl(path), expr)
 
-    def assertHttpError(self, url, code=404):
+    def assertHttpError(self, url, code=404, method='GET', data=None):
         try:
-            self.curl(url)
+            self.curl(url, method, data)
         except HttpError as e:
             if e.code != code:
                 raise Exception('Expected error code %d but got %d' % (code, e.code))
@@ -127,11 +128,18 @@ class Basetest(unittest.TestCase):
     def exec_os(cls):
         args = []
         if cls.config.hypervisor == 'firecracker':
-            args += [cls.config.run_script, "-l", "-m 2048M", "-n", "-c 4"]
+            args += [cls.config.run_script, "-m 2048M", "-n", "-c 4"]
+            if cls.config.kernel_path:
+               print('Using kernel at %s' % cls.config.kernel_path)
+               args += ['-k', cls.config.kernel_path]
         elif cls.config.use_sudo:
             args += ["/usr/bin/sudo", cls.config.run_script, "-n"]
         else:
             args += [cls.config.run_script, "--forward", "tcp::" + str(cls._client.get_port()) + "-:" + str(cls._client.get_port())]
+
+        if cls.config.kernel_path and cls.config.hypervisor != 'firecracker':
+            print('Using kernel at %s' % cls.config.kernel_path)
+            args += ['-k', '--kernel-path', cls.config.kernel_path]
 
         if cls.config.cmd:
             args += ["-e", cls.config.cmd]
@@ -158,6 +166,13 @@ class Basetest(unittest.TestCase):
             if retry == 0:
                 raise Exception("Fail to shutdown server")
             time.sleep(1)
+
+    @classmethod
+    def hard_shutdown(cls):
+        child_pid = subprocess.call(['pgrep', "-P", str(cls.os_process.pid)])
+        subprocess.call(['kill', '-9', str(child_pid)])
+        cls.os_process.kill()
+        cls.os_process.wait()
 
     @classmethod
     def start_image(cls):
